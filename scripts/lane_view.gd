@@ -81,13 +81,23 @@ func apply_global_slow(duration: float) -> void:
 	_slow_time = maxf(_slow_time, duration)
 
 
+func flash_school(school: String) -> void:
+	_pulse_flash(_school_color(school))
+
+
 func cast(school: String, kind: String, damage: float, from_global: Vector2, empowered: bool) -> void:
+	# The lane reacts on this frame. The flying gem is only the streak.
+	_pulse_flash(_school_color(school))
 	var target: Dictionary = _front_foe()
-	var speed := 1100.0 if school == "lightning" else 820.0
+	var dest := global_position + Vector2(LANE_W * 0.5, LANE_H * 0.45)
+	var target_id := -1
 	if target.is_empty():
-		_launch(from_global, global_position + Vector2(LANE_W * 0.5, LANE_H * 0.55), school, kind, damage, -1, empowered, speed)
-		return
-	_launch(from_global, _foe_center(target), school, kind, damage, int(target["id"]), empowered, speed)
+		spell_hit.emit(school)
+	else:
+		dest = _foe_center(target)
+		target_id = int(target["id"])
+		_impact({"school": school, "kind": kind, "damage": damage}, target)
+	_launch(from_global, dest, school, kind, 0.0, target_id, empowered, 1800.0, true)
 
 
 func tick(delta: float) -> void:
@@ -295,7 +305,8 @@ func _tick_missiles(delta: float) -> void:
 		var delta_v := dest - node.global_position
 		var step := float(missile["speed"]) * delta
 		if delta_v.length() <= step + 14.0:
-			_impact(missile, _foe_by_id(int(missile["target"])))
+			if not bool(missile.get("cosmetic", false)):
+				_impact(missile, _foe_by_id(int(missile["target"])))
 			node.queue_free()
 		else:
 			node.global_position += delta_v.normalized() * step
@@ -395,7 +406,7 @@ func _sweep() -> void:
 	_foes = alive
 
 
-func _launch(from_global: Vector2, dest: Vector2, school: String, kind: String, damage: float, target_id: int, empowered: bool, speed: float) -> void:
+func _launch(from_global: Vector2, dest: Vector2, school: String, kind: String, damage: float, target_id: int, empowered: bool, speed: float, cosmetic: bool = false) -> void:
 	if fx_parent == null:
 		return
 	var holder := Node2D.new()
@@ -419,6 +430,7 @@ func _launch(from_global: Vector2, dest: Vector2, school: String, kind: String, 
 		"kind": kind,
 		"damage": damage,
 		"speed": speed,
+		"cosmetic": cosmetic,
 	})
 
 
@@ -529,9 +541,9 @@ func _flash_actor(body: Polygon2D, color: Color) -> void:
 
 func _pulse_flash(color: Color) -> void:
 	_flash.color = color
-	_flash.modulate.a = 0.45
+	_flash.modulate.a = 0.62
 	var tween := create_tween()
-	tween.tween_property(_flash, "modulate:a", 0.0, 0.28)
+	tween.tween_property(_flash, "modulate:a", 0.0, 0.42)
 
 
 func _clear_dynamic() -> void:

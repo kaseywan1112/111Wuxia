@@ -59,25 +59,22 @@ func _test_schools() -> void:
 
 
 func _test_path_rules() -> void:
-	var colors: Array[int] = []
-	colors.resize(16)
-	colors.fill(0)
-	colors[1] = 1
-	var empty: Array = []
-	var started: Dictionary = Rules.try_extend(empty, Vector2i(0, 0), colors, 4)
-	_check(str(started["action"]) == "start", "press starts a path")
-	var path: Array = started["path"]
-	var diagonal: Dictionary = Rules.try_extend(path, Vector2i(1, 1), colors, 4)
-	_check(str(diagonal["action"]) == "ignore", "diagonals are ignored")
-	var other: Dictionary = Rules.try_extend(path, Vector2i(1, 0), colors, 4)
-	_check(str(other["action"]) == "ignore", "different color is ignored")
-	var right: Dictionary = Rules.try_extend(path, Vector2i(0, 1), colors, 4)
-	_check(str(right["action"]) == "add", "orthogonal same color extends")
-	path = right["path"]
-	var back: Dictionary = Rules.try_extend(path, Vector2i(0, 0), colors, 4)
-	_check(str(back["action"]) == "undo" and back["path"].size() == 1, "stepping back undoes")
-	var jump: Dictionary = Rules.try_extend(path, Vector2i(0, 3), colors, 4)
-	_check(str(jump["action"]) == "ignore", "gaps are ignored")
+	var reds: Dictionary = Rules.resolve_swipe([0, 0, 0, 1, 1])
+	_check(int(reds["color"]) == 0 and int(reds["length"]) == 3, "most gems of one color win")
+	var blue_later: Dictionary = Rules.resolve_swipe([0, 0, 0, 1, 1, 1])
+	_check(int(blue_later["color"]) == 1 and int(blue_later["length"]) == 3, "a tie goes to the later color")
+	var red_later: Dictionary = Rules.resolve_swipe([1, 1, 1, 0, 0, 0])
+	_check(int(red_later["color"]) == 0 and int(red_later["length"]) == 3, "a tie goes to red when red is later")
+	var woven: Dictionary = Rules.resolve_swipe([0, 1, 0, 1])
+	_check(int(woven["color"]) == 1 and int(woven["length"]) == 2, "equal counts use the latest gem")
+	var short: Dictionary = Rules.resolve_swipe([0, 0, 1])
+	_check(int(short["length"]) == 2 and int(short["color"]) == 0, "two of the winner is not a cast")
+	var none: Dictionary = Rules.resolve_swipe([])
+	_check(int(none["length"]) == 0 and int(none["color"]) == -1, "an empty swipe has no color")
+	var six: Dictionary = Rules.resolve_swipe([2, 0, 2, 2, 2, 2, 2])
+	_check(int(six["color"]) == 2 and int(six["length"]) == 6, "six of the winner is the super length")
+	var more: Dictionary = Rules.resolve_swipe([0, 1, 0, 1, 0, 1, 0])
+	_check(int(more["color"]) == 0 and int(more["length"]) == 4, "a larger count beats a later color")
 
 
 func _test_routes() -> void:

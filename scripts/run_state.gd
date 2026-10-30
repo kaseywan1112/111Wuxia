@@ -1,7 +1,7 @@
 extends RefCounted
 
 ## Run rules for the real-time lane roguelike.
-## A chain of length n deals base * 1.15^(n-3). Length 6+ is a super.
+## A swipe's winning color of length n deals base * 1.15^(n-3). Length 6+ is a super.
 ## White is a bonus, not a damage school.
 
 const COLS := 8
@@ -61,7 +61,7 @@ const SHOP := {
 const REWARDS := {
 	"power": {"name": "法术精通", "desc": "所有法术伤害 +20%。"},
 	"vital": {"name": "壮骨", "desc": "最大生命 +30，并恢复 30。"},
-	"white": {"name": "白宝石矿", "desc": "棋盘上更容易出现白宝石。"},
+	"white": {"name": "白宝石矿", "desc": "场上更容易出现白宝石。"},
 	"tempo": {"name": "从容", "desc": "连击中断前的空窗 +1.6 秒。"},
 	"purse": {"name": "钱袋", "desc": "立刻获得 30 金。"},
 }
@@ -363,29 +363,29 @@ func apply_white(kind: String) -> String:
 			return ""
 
 
-static func try_extend(path: Array, next: Vector2i, colors: Array, cols: int) -> Dictionary:
-	if next.x < 0 or next.y < 0:
-		return {"path": path, "action": "ignore"}
-	var index := next.y * cols + next.x
-	if index < 0 or index >= colors.size() or int(colors[index]) < 0:
-		return {"path": path, "action": "ignore"}
-	if path.is_empty():
-		return {"path": [next], "action": "start"}
-	if path.size() >= 2 and next == path[path.size() - 2]:
-		var trimmed: Array = path.duplicate()
-		trimmed.pop_back()
-		return {"path": trimmed, "action": "undo"}
-	if path.has(next):
-		return {"path": path, "action": "ignore"}
-	var last: Vector2i = path[path.size() - 1]
-	if absi(last.x - next.x) + absi(last.y - next.y) != 1:
-		return {"path": path, "action": "ignore"}
-	var last_index := last.y * cols + last.x
-	if int(colors[index]) != int(colors[last_index]):
-		return {"path": path, "action": "ignore"}
-	var grown: Array = path.duplicate()
-	grown.append(next)
-	return {"path": grown, "action": "add"}
+## order is the color index of each gem the stroke passed, once each, in stroke order.
+## The color with the most gems wins. Equal counts go to the color that appeared latest.
+static func resolve_swipe(order: Array) -> Dictionary:
+	if order.is_empty():
+		return {"color": -1, "length": 0}
+	var counts := {}
+	var last_seen := {}
+	for i in order.size():
+		var color := int(order[i])
+		counts[color] = int(counts.get(color, 0)) + 1
+		last_seen[color] = i
+	var best_color := -1
+	var best_count := -1
+	var best_last := -1
+	for key in counts.keys():
+		var color := int(key)
+		var count := int(counts[color])
+		var last := int(last_seen[color])
+		if count > best_count or (count == best_count and last > best_last):
+			best_count = count
+			best_last = last
+			best_color = color
+	return {"color": best_color, "length": best_count}
 
 
 func _pick_ids(source: Array, count: int) -> Array[String]:

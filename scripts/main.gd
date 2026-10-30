@@ -178,8 +178,8 @@ func _start_fight() -> void:
 	lane.freeze_bonus = state.freeze_bonus
 	lane.summon_bonus = state.summon_bonus
 	lane.begin_fight(state.current_kind(), state.trash_variant(), state.hp, state.max_hp)
-	action_label.text = "敌人从下方走上来。划同色宝石来施法。"
-	preview_label.text = "按住同色宝石划线，上下左右，至少 3 颗"
+	action_label.text = "敌人从下方走上来。划过漂浮的宝石来施法。"
+	preview_label.text = "按住划过宝石。一刀里最多的颜色生效，至少 3 颗"
 	_refresh_hud()
 	get_viewport().gui_release_focus()
 
@@ -197,6 +197,7 @@ func _on_chain(color_index: int, length: int, origin: Vector2) -> void:
 		if kind == "extra":
 			lane.apply_global_slow(1.6)
 		action_label.text = text
+		lane.flash_school("white")
 		_spark(origin, Rules.GEM_COLORS[4])
 	else:
 		var damage := float(state.chain_damage(length, state.combo, empowered))
@@ -214,7 +215,7 @@ func _on_broken() -> void:
 	if state.combo > 0:
 		state.break_combo()
 		_break_juice()
-	preview_label.text = "不足 3 颗，连击中断"
+	preview_label.text = "这一刀最多的颜色不足 3 颗，连击中断"
 	_refresh_hud()
 
 
@@ -519,22 +520,22 @@ func _build_combat() -> void:
 	combat_root.add_child(world)
 
 	board = BoardView.new()
-	board.position = Vector2(50, 8)
+	board.position = Vector2(28, 8)
 	world.add_child(board)
 	lane = LaneView.new()
 	lane.position = Vector2(660, 4)
 	world.add_child(lane)
 
-	preview_label = _label("按住同色宝石划线，上下左右，至少 3 颗", 16, PAPER, true)
-	preview_label.position = Vector2(50, 530)
-	preview_label.size = Vector2(520, 48)
+	preview_label = _label("按住划过宝石。一刀里最多的颜色生效，至少 3 颗", 16, PAPER, true)
+	preview_label.position = Vector2(28, 516)
+	preview_label.size = Vector2(600, 44)
 	world.add_child(preview_label)
 	action_label = _label("", 18, GOLD, true)
-	action_label.position = Vector2(50, 578)
-	action_label.size = Vector2(520, 48)
+	action_label.position = Vector2(28, 562)
+	action_label.size = Vector2(600, 44)
 	world.add_child(action_label)
 	var legend := _label("红 火焰    蓝 寒冰    绿 藤蔓    紫 雷电    白 奖励", 14, MUTED)
-	legend.position = Vector2(50, 632)
+	legend.position = Vector2(28, 612)
 	world.add_child(legend)
 
 	fx = Control.new()
@@ -553,11 +554,11 @@ func _build_start() -> void:
 	var title := _label("消消乐 Rogue", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	var sub := _label("左边划宝石，右边打一条路", 18, MUTED)
+	var sub := _label("左边划过漂浮的宝石，右边打一条路", 18, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"按住鼠标，在相邻的同色宝石上划线。只能上下左右，可以转弯，不能斜着连。至少 3 颗才算成功。第 4 颗起，每多 1 颗伤害 ×1.15。连到 6 颗会施放该颜色的大招。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。法术会从划线飞到赛道上。连击越高，增伤、闪屏和声音越猛；划断或停太久，连击就掉。",
+		"按住鼠标，划过左边漂浮的宝石。宝石被划到也不会消失。一刀里数量最多的颜色才会施法；数量相同则算这一刀里更晚划到的颜色。那种颜色至少 3 颗才成功，第 4 颗起每多 1 颗伤害 ×1.15，6 颗及以上施放大招。不够 3 颗就断连。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。划中的同一刻，右边就会闪光、冰冻、出藤或落雷。连击越高，增伤、闪屏和声音越猛；划空或停太久，连击就掉。",
 		16,
 		PAPER,
 		true
