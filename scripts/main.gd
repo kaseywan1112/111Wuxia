@@ -4,7 +4,7 @@ const Rules = preload("res://scripts/run_state.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const LaneView = preload("res://scripts/lane_view.gd")
 
-enum Mode { START, ROUTE, COMBAT, SHOP, REWARD, WIN, LOSE }
+enum Mode { START, ROUTE, COMBAT, SHOP, REWARD, LEVEL, WIN, LOSE }
 
 const INK := Color("0e1116")
 const PAPER := Color("e7e4dc")
@@ -16,6 +16,8 @@ var state
 var mode := Mode.START
 var ui_lock := false
 var closing_fight := false
+var level_pending := 0
+var pending_clear := false
 
 var board
 var lane: Control
@@ -32,6 +34,7 @@ var start_screen: Control
 var route_screen: Control
 var shop_screen: Control
 var reward_screen: Control
+var level_screen: Control
 var win_screen: Control
 var lose_screen: Control
 
@@ -43,12 +46,15 @@ var preview_label: Label
 var action_label: Label
 var empower_label: Label
 var seed_label: Label
+var level_label: Label
 var combo_fill: ColorRect
 var lamps: Array[ColorRect] = []
 var shop_gold: Label
 var shop_hint: Label
 var shop_box: VBoxContainer
 var reward_box: HBoxContainer
+var level_box: HBoxContainer
+var level_title: Label
 var win_detail: Label
 var lose_detail: Label
 
@@ -67,6 +73,7 @@ func _ready() -> void:
 	_build_route()
 	_build_shop()
 	_build_reward()
+	_build_level()
 	_build_win()
 	_build_lose()
 	_build_flash()
@@ -96,6 +103,8 @@ func _process(delta: float) -> void:
 			_break_juice()
 		_paint_combo()
 	lane.tick(delta)
+	if level_pending > 0 and mode == Mode.COMBAT and not closing_fight and state.hp > 0:
+		_open_level()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -123,6 +132,13 @@ func _unhandled_input(event: InputEvent) -> void:
 				_pick_reward(1)
 			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
 				_pick_reward(2)
+		Mode.LEVEL:
+			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
+				_pick_level(0)
+			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
+				_pick_level(1)
+			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
+				_pick_level(2)
 		Mode.SHOP:
 			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
 				_buy(0)
@@ -140,6 +156,8 @@ func _start_run() -> void:
 	ui_lock = true
 	state.start_run(_new_seed())
 	closing_fight = false
+	level_pending = 0
+	pending_clear = false
 	_show_route()
 	ui_lock = false
 
@@ -178,8 +196,8 @@ func _start_fight() -> void:
 	lane.freeze_bonus = state.freeze_bonus
 	lane.summon_bonus = state.summon_bonus
 	lane.begin_fight(state.current_kind(), state.trash_variant(), state.hp, state.max_hp)
-	action_label.text = "宝石从四周飞过。短划切开它们来施法。"
-	preview_label.text = "快速短划。一刀里最多的颜色生效，至少 3 颗"
+	action_label.text = "宝石从顶端落下，叠在场里。划过挨着的同色宝石来施法。"
+	preview_label.text = "同色相连，至少 3 颗。任意方向，要挨着"
 	_refresh_hud()
 	get_viewport().gui_release_focus()
 
@@ -212,15 +230,13 @@ func _on_chain(color_index: int, length: int, origin: Vector2) -> void:
 
 
 func _on_broken() -> void:
-	if state.combo > 0:
-		state.break_combo()
-		_break_juice()
-	preview_label.text = "这一刀最多的颜色不足 3 颗，连击中断"
+	preview_label.text = "这一笔没有连上"
 	_refresh_hud()
 
 
 func _on_path(color_index: int, length: int) -> void:
 	if length <= 0 or color_index < 0:
+		preview_label.text = "同色相连，至少 3 颗。任意方向，要挨着"
 		return
 	var school := str(state.school_of(color_index))
 	if length < Rules.MIN_CHAIN:
@@ -259,11 +275,22 @@ func _on_player_damaged(amount: int) -> void:
 
 func _on_killed(gold: int) -> void:
 	state.gold += gold
+	if state.note_kill():
+		level_pending += 1
 	_refresh_hud()
 	_play_tone(660.0, 0.07, 0.22)
 
 
 func _on_fight_cleared() -> void:
+	if mode != Mode.COMBAT or state.hp <= 0 or closing_fight:
+		return
+	if level_pending > 0:
+		pending_clear = true
+		return
+	_finish_fight()
+
+
+func _finish_fight() -> void:
 	if mode != Mode.COMBAT or state.hp <= 0 or closing_fight:
 		return
 	closing_fight = true
@@ -278,6 +305,43 @@ func _on_fight_cleared() -> void:
 		return
 	state.advance()
 	_enter_node()
+
+
+func _open_level() -> void:
+	if level_pending <= 0 or mode != Mode.COMBAT or state.hp <= 0:
+		return
+	level_pending -= 1
+	mode = Mode.LEVEL
+	board.cancel_stroke()
+	board.accept_input = false
+	state.roll_level()
+	_rebuild_level()
+	level_screen.visible = true
+	get_viewport().gui_release_focus()
+
+
+func _pick_level(index: int) -> void:
+	if ui_lock or mode != Mode.LEVEL:
+		return
+	if index < 0 or index >= state.level_stock.size():
+		return
+	ui_lock = true
+	state.apply_level(str(state.level_stock[index]))
+	lane.freeze_bonus = state.freeze_bonus
+	lane.summon_bonus = state.summon_bonus
+	lane.set_player_hp(state.hp, state.max_hp)
+	level_screen.visible = false
+	mode = Mode.COMBAT
+	_refresh_hud()
+	ui_lock = false
+	if level_pending > 0 and state.hp > 0:
+		_open_level()
+		return
+	if pending_clear:
+		pending_clear = false
+		_finish_fight()
+		return
+	board.accept_input = true
 
 
 func _on_spell_hit(_school: String) -> void:
@@ -363,12 +427,15 @@ func _show_lose() -> void:
 func _show_only(which: Control) -> void:
 	for screen in [start_screen, route_screen, combat_root, shop_screen, reward_screen, win_screen, lose_screen]:
 		screen.visible = screen == which
+	if level_screen != null:
+		level_screen.visible = false
 
 
 func _refresh_hud() -> void:
 	progress_label.text = state.progress_text()
 	hp_label.text = "生命  %d / %d" % [state.hp, state.max_hp]
 	gold_label.text = "金币  %d" % state.gold
+	level_label.text = state.level_text()
 	seed_label.text = "种子 %d" % state.seed_value
 	empower_label.text = "下一发已强化" if state.empower_next else ""
 	_paint_combo()
@@ -483,10 +550,12 @@ func _build_combat() -> void:
 	progress_label = _label("路线", 16, GOLD)
 	hp_label = _label("生命", 16, PAPER)
 	gold_label = _label("金币", 16, PAPER)
+	level_label = _label("等级  1", 16, PAPER)
 	seed_label = _label("种子", 14, MUTED)
 	top.add_child(progress_label)
 	top.add_child(hp_label)
 	top.add_child(gold_label)
+	top.add_child(level_label)
 	top.add_child(seed_label)
 	var bottom := HBoxContainer.new()
 	bottom.add_theme_constant_override("separation", 12)
@@ -526,7 +595,7 @@ func _build_combat() -> void:
 	lane.position = Vector2(660, 4)
 	world.add_child(lane)
 
-	preview_label = _label("快速短划。一刀里最多的颜色生效，至少 3 颗", 16, PAPER, true)
+	preview_label = _label("同色相连，至少 3 颗。任意方向，要挨着", 16, PAPER, true)
 	preview_label.position = Vector2(28, 516)
 	preview_label.size = Vector2(600, 44)
 	world.add_child(preview_label)
@@ -554,11 +623,11 @@ func _build_start() -> void:
 	var title := _label("消消乐 Rogue", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	var sub := _label("左边短划飞过的宝石，右边打一条路", 18, MUTED)
+	var sub := _label("左边落下的宝石叠成一堆，右边打一条路", 18, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"宝石从四周飞进左边。按住鼠标做短短的一划，像切水果，划到的宝石会消失。一刀里数量最多的颜色才会施法；数量相同则算更晚划到的颜色。那种颜色至少 3 颗才成功，第 4 颗起每多 1 颗伤害 ×1.15，6 颗及以上施放大招。不够 3 颗就断连，但划到的宝石一样会消失。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。划中的同一刻，右边就会闪光、冰冻、出藤或落雷。连击越高，增伤、闪屏和声音越猛；划空或停太久，连击就掉。",
+		"宝石从左边场地的顶端慢慢落下，左右和底部是墙，宝石会叠起来。堆到顶就先不再落下，直到你消出空位。\n\n按住鼠标划过彼此挨着的同色宝石。方向不限，也不用对齐格子。同色至少连上 3 颗才会消除并施法，第 4 颗起每多 1 颗伤害 ×1.15，6 颗及以上是大招。不够 3 颗什么都不会发生，宝石留在原地。消掉之后，上面的会落下来。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。连上的同一刻，右边就会闪光并命中。连着打会提高连击。杀敌一段之后会升级，从几项强化里选一个，效果留到这局结束。",
 		16,
 		PAPER,
 		true
@@ -682,6 +751,65 @@ func _build_reward() -> void:
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(hint)
 	add_child(reward_screen)
+
+
+func _build_level() -> void:
+	level_screen = Control.new()
+	_cover(level_screen)
+	level_screen.visible = false
+	level_screen.z_index = 40
+	level_screen.mouse_filter = Control.MOUSE_FILTER_STOP
+	var dim := ColorRect.new()
+	dim.color = Color(0, 0, 0, 0.36)
+	dim.mouse_filter = Control.MOUSE_FILTER_STOP
+	_cover(dim)
+	level_screen.add_child(dim)
+	var center := CenterContainer.new()
+	_cover(center)
+	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	level_screen.add_child(center)
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	center.add_child(box)
+	level_title = _label("升级", 36, GOLD)
+	level_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(level_title)
+	var sub := _label("选一个强化，留到这局结束", 16, MUTED)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(sub)
+	level_box = HBoxContainer.new()
+	level_box.add_theme_constant_override("separation", 16)
+	level_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_child(level_box)
+	var hint := _label("按 1 / 2 / 3 选择", 14, MUTED)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(hint)
+	add_child(level_screen)
+
+
+func _rebuild_level() -> void:
+	level_title.text = "升到 %d 级" % state.level
+	for child in level_box.get_children():
+		child.queue_free()
+	var tints: Array[Color] = [Color("243044"), Color("24362f"), Color("3a3224")]
+	for i in state.level_stock.size():
+		var id := str(state.level_stock[i])
+		var info: Dictionary = Rules.LEVEL_UPS[id]
+		var panel := _card(tints[i % tints.size()])
+		panel.custom_minimum_size = Vector2(250, 220)
+		var inner := VBoxContainer.new()
+		inner.add_theme_constant_override("separation", 8)
+		panel.add_child(inner)
+		var name := _label(str(info["name"]), 22, GOLD)
+		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		inner.add_child(name)
+		var desc := _label(str(info["desc"]), 15, PAPER, true)
+		desc.custom_minimum_size = Vector2(210, 72)
+		inner.add_child(desc)
+		var button := _button("拿下")
+		button.pressed.connect(_pick_level.bind(i))
+		inner.add_child(button)
+		level_box.add_child(panel)
 
 
 func _rebuild_reward() -> void:

@@ -1,8 +1,8 @@
 extends RefCounted
 
 ## Run rules for the real-time lane roguelike.
-## A swipe's winning color of length n deals base * 1.15^(n-3). Length 6+ is a super.
-## White is a bonus, not a damage school.
+## A same-color touching stroke of length n deals base * 1.15^(n-3). Length 6+ is a super.
+## White is a bonus, not a damage school. Level picks last for the current run only.
 
 const COLS := 8
 const MIN_CHAIN := 3
@@ -66,6 +66,17 @@ const REWARDS := {
 	"purse": {"name": "钱袋", "desc": "立刻获得 30 金。"},
 }
 
+const LEVEL_UPS := {
+	"power": {"name": "法术增幅", "desc": "本局法术伤害 +12%。"},
+	"vital": {"name": "生机", "desc": "最大生命 +16，并恢复 16。"},
+	"freeze": {"name": "深寒", "desc": "冰冻时间额外 +0.35 秒。"},
+	"summon": {"name": "藤灵续命", "desc": "藤灵多停留 1.2 秒。"},
+	"tempo": {"name": "连击余韵", "desc": "连击增伤提高，空窗 +0.7 秒。"},
+	"white": {"name": "白宝石缘", "desc": "更容易掉落白宝石。"},
+	"purse": {"name": "拾金", "desc": "立刻获得 20 金。"},
+	"heal": {"name": "回气", "desc": "恢复 24 点生命。"},
+}
+
 var seed_value: int = 1
 var rng := RandomNumberGenerator.new()
 var route_index: int = -1
@@ -82,8 +93,12 @@ var white_weight: float = 0.1
 var empower_next: bool = false
 var combo: int = 0
 var combo_time: float = 0.0
+var level: int = 1
+var kills_toward: int = 0
+var kills_needed: int = 3
 var shop_stock: Array[String] = []
 var reward_stock: Array[String] = []
+var level_stock: Array[String] = []
 
 
 func start_run(new_seed: int) -> void:
@@ -103,8 +118,12 @@ func start_run(new_seed: int) -> void:
 	empower_next = false
 	combo = 0
 	combo_time = 0.0
+	level = 1
+	kills_toward = 0
+	kills_needed = 3
 	shop_stock = []
 	reward_stock = []
+	level_stock = []
 
 
 func choose_route(index: int) -> void:
@@ -306,6 +325,47 @@ func roll_reward() -> void:
 	reward_stock = _pick_ids(REWARDS.keys(), 3)
 
 
+func roll_level() -> void:
+	level_stock = _pick_ids(LEVEL_UPS.keys(), 3)
+
+
+func level_text() -> String:
+	return "等级 %d  ·  %d/%d" % [level, kills_toward, kills_needed]
+
+
+## One level after a short stretch of kills. The next stretch asks for one more kill.
+func note_kill() -> bool:
+	kills_toward += 1
+	if kills_toward < kills_needed:
+		return false
+	kills_toward = 0
+	level += 1
+	kills_needed += 1
+	return true
+
+
+func apply_level(id: String) -> void:
+	match id:
+		"power":
+			spell_power += 0.12
+		"vital":
+			max_hp += 16
+			hp = mini(max_hp, hp + 16)
+		"freeze":
+			freeze_bonus += 0.35
+		"summon":
+			summon_bonus += 1.2
+		"tempo":
+			combo_step_bonus += 0.04
+			combo_window_bonus += 0.7
+		"white":
+			white_weight += 0.05
+		"purse":
+			gold += 20
+		"heal":
+			hp = mini(max_hp, hp + 24)
+
+
 func apply_shop(id: String) -> bool:
 	if not SHOP.has(id):
 		return false
@@ -363,29 +423,25 @@ func apply_white(kind: String) -> String:
 			return ""
 
 
-## order is the color index of each gem the stroke passed, once each, in stroke order.
-## The color with the most gems wins. Equal counts go to the color that appeared latest.
-static func resolve_swipe(order: Array) -> Dictionary:
-	if order.is_empty():
+## hits are dictionaries of color and pos, in the order the stroke passed them.
+## Color locks to the first gem. Later gems count only when they match and touch the previous accepted gem.
+## Touch is center distance, so the stroke may turn in any direction.
+static func resolve_touch_chain(hits: Array, touch: float) -> Dictionary:
+	if hits.is_empty():
 		return {"color": -1, "length": 0}
-	var counts := {}
-	var last_seen := {}
-	for i in order.size():
-		var color := int(order[i])
-		counts[color] = int(counts.get(color, 0)) + 1
-		last_seen[color] = i
-	var best_color := -1
-	var best_count := -1
-	var best_last := -1
-	for key in counts.keys():
-		var color := int(key)
-		var count := int(counts[color])
-		var last := int(last_seen[color])
-		if count > best_count or (count == best_count and last > best_last):
-			best_count = count
-			best_last = last
-			best_color = color
-	return {"color": best_color, "length": best_count}
+	var color := int(hits[0]["color"])
+	var length := 1
+	var last: Vector2 = hits[0]["pos"]
+	for i in range(1, hits.size()):
+		var hit: Dictionary = hits[i]
+		if int(hit["color"]) != color:
+			continue
+		var pos: Vector2 = hit["pos"]
+		if pos.distance_to(last) > touch:
+			continue
+		length += 1
+		last = pos
+	return {"color": color, "length": length}
 
 
 func _pick_ids(source: Array, count: int) -> Array[String]:

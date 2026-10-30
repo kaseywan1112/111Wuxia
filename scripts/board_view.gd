@@ -4,17 +4,14 @@ const Rules = preload("res://scripts/run_state.gd")
 
 const FIELD_W := 600.0
 const FIELD_H := 500.0
-const START_GEMS := 10
-const SPAWN_INTERVAL := 0.16
-const BURST_INTERVAL := 0.85
-const GEM_CAP := 22
-const GEM_RADIUS := 30.0
-const HIT_RADIUS := 44.0
-const FLY_MIN := 165.0
-const FLY_MAX := 245.0
-const SWIPE_MIN := 18.0
-const SLASH_MAX_LENGTH := 220.0
-const SLASH_MAX_TIME := 0.32
+const GEM_RADIUS := 27.0
+const COLLIDE_R := 24.8
+const TOUCH_DIST := 62.0
+const HIT_RADIUS := 42.0
+const GRAVITY := 520.0
+const TERMINAL := 128.0
+const SPAWN_INTERVAL := 0.48
+const CLUSTER_INTERVAL := 2.15
 
 signal chain_resolved(color_index: int, length: int, origin: Vector2)
 signal chain_broken
@@ -26,17 +23,15 @@ var roll_color: Callable = Callable()
 
 var _gems: Array = []
 var _next_id := 1
-var _spawn_timer := 0.0
-var _burst_timer := 0.35
+var _spawn_timer := 0.4
+var _cluster_timer := 1.2
 var _rng := RandomNumberGenerator.new()
 var _drawing := false
 var _pointer_down := false
 var _stroke: PackedVector2Array = PackedVector2Array()
-var _hit_ids: Array[int] = []
-var _hit_colors: Array[int] = []
-var _hit_points: Array[Vector2] = []
-var _travel := 0.0
-var _stroke_started_ms := 0
+var _chain_ids: Array[int] = []
+var _chain_color := -1
+var _ceiling_note := false
 var _line: Line2D
 
 
@@ -65,6 +60,14 @@ func _ready() -> void:
 	_line.end_cap_mode = Line2D.LINE_CAP_ROUND
 	_line.z_index = 6
 	add_child(_line)
+	queue_redraw()
+
+
+func _draw() -> void:
+	var wall := Color("6d788c")
+	draw_line(Vector2(2, 0), Vector2(2, FIELD_H - 2), wall, 4.0)
+	draw_line(Vector2(FIELD_W - 2, 0), Vector2(FIELD_W - 2, FIELD_H - 2), wall, 4.0)
+	draw_line(Vector2(0, FIELD_H - 2), Vector2(FIELD_W, FIELD_H - 2), wall, 5.0)
 
 
 func setup(roller: Callable) -> void:
@@ -73,58 +76,44 @@ func setup(roller: Callable) -> void:
 
 func refill() -> void:
 	_drawing = false
+	_pointer_down = false
 	_clear_stroke()
 	for gem in _gems:
 		var node: Node = gem["node"]
 		if is_instance_valid(node):
 			node.queue_free()
 	_gems.clear()
-	_spawn_timer = SPAWN_INTERVAL
-	_burst_timer = 0.45
-	for _i in START_GEMS:
-		_spawn_flyer(true)
-	_spawn_burst()
+	_ceiling_note = false
+	_spawn_timer = 0.35
+	_cluster_timer = 1.15
+	_seed_pile()
+
+
+func cancel_stroke() -> void:
+	_pointer_down = false
+	if _drawing:
+		_drawing = false
+		_fade_stroke()
+	_clear_chain()
+	path_changed.emit(-1, 0)
 
 
 func _process(delta: float) -> void:
-	if not accept_input and not _drawing:
+	if not accept_input:
 		return
-	if accept_input:
-		_spawn_timer -= delta
-		if _spawn_timer <= 0.0:
-			_spawn_timer = SPAWN_INTERVAL
-			if _gems.size() < GEM_CAP:
-				_spawn_flyer(false)
-		_burst_timer -= delta
-		if _burst_timer <= 0.0:
-			_burst_timer = BURST_INTERVAL
-			if _gems.size() < GEM_CAP - 2:
-				_spawn_burst()
-	if _drawing:
-		var elapsed := float(Time.get_ticks_msec() - _stroke_started_ms) / 1000.0
-		if elapsed >= SLASH_MAX_TIME:
-			var at := _stroke[_stroke.size() - 1] if not _stroke.is_empty() else Vector2(FIELD_W * 0.5, FIELD_H * 0.5)
-			var held := _pointer_down
-			_end_stroke()
-			if held and accept_input:
-				_begin_stroke(at)
-	var alive: Array = []
-	for gem in _gems:
-		var pos: Vector2 = gem["pos"]
-		var vel: Vector2 = gem["vel"]
-		pos += vel * delta
-		gem["life"] = float(gem["life"]) + delta
-		gem["pos"] = pos
-		var node: Node2D = gem["node"]
-		var outside := pos.x < -70.0 or pos.x > FIELD_W + 70.0 or pos.y < -70.0 or pos.y > FIELD_H + 70.0
-		if float(gem["life"]) > 0.4 and outside:
-			if is_instance_valid(node):
-				node.queue_free()
-			continue
-		if is_instance_valid(node):
-			node.position = pos
-		alive.append(gem)
-	_gems = alive
+	_spawn_timer -= delta
+	if _spawn_timer <= 0.0:
+		_spawn_timer = SPAWN_INTERVAL
+		_spawn_from_top()
+	_cluster_timer -= delta
+	if _cluster_timer <= 0.0:
+		_cluster_timer = CLUSTER_INTERVAL
+		_spawn_cluster()
+	var blocked := _ceiling_blocked()
+	if blocked and not _ceiling_note:
+		board_note.emit("宝石堆到顶了，先消开一点")
+	_ceiling_note = blocked
+	_simulate(delta)
 
 
 func _input(event: InputEvent) -> void:
@@ -155,14 +144,10 @@ func _input(event: InputEvent) -> void:
 func _begin_stroke(local: Vector2) -> void:
 	_drawing = true
 	_stroke = PackedVector2Array()
-	_hit_ids.clear()
-	_hit_colors.clear()
-	_hit_points.clear()
-	_travel = 0.0
-	_stroke_started_ms = Time.get_ticks_msec()
+	_clear_chain()
 	_line.clear_points()
-	_line.width = 18.0
-	_line.default_color = Color(1, 1, 1, 0.95)
+	_line.width = 16.0
+	_line.default_color = Color(1, 1, 1, 0.92)
 	_extend_stroke(local)
 
 
@@ -172,125 +157,265 @@ func _extend_stroke(local: Vector2) -> void:
 		_stroke.append(clamped)
 		_line.add_point(clamped)
 		_collect_along(clamped, clamped)
-		_emit_preview()
 		return
 	var previous: Vector2 = _stroke[_stroke.size() - 1]
-	var step := clamped - previous
-	if step.length() < 2.0:
+	if previous.distance_to(clamped) < 3.0:
 		return
-	_travel += step.length()
 	_stroke.append(clamped)
 	_line.add_point(clamped)
 	_collect_along(previous, clamped)
-	_emit_preview()
-	if _travel >= SLASH_MAX_LENGTH:
-		var held := _pointer_down
-		_end_stroke()
-		if held and accept_input:
-			_begin_stroke(clamped)
 
 
 func _collect_along(a: Vector2, b: Vector2) -> void:
+	var span := a.distance_to(b)
+	var steps := maxi(int(span / 8.0), 1)
+	var found: Array = []
 	for gem in _gems:
 		var id := int(gem["id"])
-		if _hit_ids.has(id):
+		if _chain_ids.has(id):
 			continue
 		var pos: Vector2 = gem["pos"]
-		if _distance_to_segment(pos, a, b) > HIT_RADIUS:
-			continue
-		_hit_ids.append(id)
-		_hit_colors.append(int(gem["color"]))
-		_hit_points.append(pos)
-		_mark_sliced(gem)
+		var best := HIT_RADIUS + 1.0
+		var along := 0.0
+		for step in steps + 1:
+			var point := a.lerp(b, float(step) / float(steps))
+			var distance := pos.distance_to(point)
+			if distance < best:
+				best = distance
+				along = float(step)
+		if best <= HIT_RADIUS:
+			found.append({"gem": gem, "along": along})
+	found.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		return float(left["along"]) < float(right["along"])
+	)
+	for item in found:
+		_try_add(item["gem"])
+
+
+func _try_add(gem: Dictionary) -> void:
+	var id := int(gem["id"])
+	if _chain_ids.has(id):
+		return
+	var color := int(gem["color"])
+	var pos: Vector2 = gem["pos"]
+	if _chain_ids.is_empty():
+		_chain_ids.append(id)
+		_chain_color = color
+		_tint_stroke()
+		_paint_chain()
+		path_changed.emit(color, _chain_ids.size())
+		return
+	if color != _chain_color:
+		return
+	var previous := _gem_by_id(_chain_ids[_chain_ids.size() - 1])
+	if previous.is_empty():
+		return
+	var previous_pos: Vector2 = previous["pos"]
+	if previous_pos.distance_to(pos) > TOUCH_DIST:
+		return
+	_chain_ids.append(id)
+	_paint_chain()
+	path_changed.emit(_chain_color, _chain_ids.size())
 
 
 func _end_stroke() -> void:
 	_drawing = false
-	var moved := _travel >= SWIPE_MIN or _hit_colors.size() >= 2
-	var resolved: Dictionary = Rules.resolve_swipe(_hit_colors)
-	var color_index := int(resolved["color"])
-	var length := int(resolved["length"])
-	var origin := _origin_for(color_index)
+	var length := _chain_ids.size()
+	var color_index := _chain_color
+	var origin := _chain_origin()
 	_fade_stroke()
-	if not moved:
-		_restore_gems()
-		path_changed.emit(-1, 0)
-		return
-	_consume_hits()
 	if length >= Rules.MIN_CHAIN and color_index >= 0:
+		_consume_chain()
 		chain_resolved.emit(color_index, length, origin)
-	else:
-		chain_broken.emit()
-
-
-func _origin_for(color_index: int) -> Vector2:
-	if color_index < 0:
-		if _stroke.is_empty():
-			return global_position + size * 0.5
-		var last: Vector2 = _stroke[_stroke.size() - 1]
-		return get_global_rect().position + last
-	for i in range(_hit_colors.size() - 1, -1, -1):
-		if _hit_colors[i] == color_index:
-			return get_global_rect().position + _hit_points[i]
-	return get_global_rect().position + size * 0.5
-
-
-func _emit_preview() -> void:
-	var resolved: Dictionary = Rules.resolve_swipe(_hit_colors)
-	path_changed.emit(int(resolved["color"]), int(resolved["length"]))
-
-
-func _spawn_flyer(already_inside: bool) -> void:
-	if _gems.size() >= GEM_CAP or not roll_color.is_valid():
 		return
-	var edge := _rng.randi() % 4
-	var lateral := _rng.randf_range(48.0, (FIELD_H if edge < 2 else FIELD_W) - 48.0)
-	var jitter := _rng.randf_range(-180.0, 180.0)
-	var speed := _rng.randf_range(FLY_MIN, FLY_MAX)
-	var progress := _rng.randf_range(0.18, 0.72) if already_inside else 0.0
-	_launch_gem(int(roll_color.call()), edge, lateral, jitter, speed, progress)
+	_clear_chain()
+	path_changed.emit(-1, 0)
 
 
-func _spawn_burst() -> void:
-	if not roll_color.is_valid() or _gems.size() >= GEM_CAP - 2:
+func _chain_origin() -> Vector2:
+	if _chain_ids.is_empty():
+		return global_position + size * 0.5
+	var gem := _gem_by_id(_chain_ids[_chain_ids.size() - 1])
+	if gem.is_empty():
+		return global_position + size * 0.5
+	var pos: Vector2 = gem["pos"]
+	return get_global_rect().position + pos
+
+
+func _simulate(delta: float) -> void:
+	for gem in _gems:
+		var vel: Vector2 = gem["vel"]
+		vel.y = minf(vel.y + GRAVITY * delta, TERMINAL)
+		vel.x *= exp(-1.8 * delta)
+		gem["vel"] = vel
+		gem["pos"] = gem["pos"] + vel * delta
+	for _i in 8:
+		_separate()
+		_constrain_walls()
+	for gem in _gems:
+		_try_sleep(gem)
+		_constrain_one(gem)
+		var node: Node2D = gem["node"]
+		if is_instance_valid(node):
+			node.position = gem["pos"]
+
+
+func _separate() -> void:
+	for i in _gems.size():
+		for j in range(i + 1, _gems.size()):
+			var a: Dictionary = _gems[i]
+			var b: Dictionary = _gems[j]
+			var pa: Vector2 = a["pos"]
+			var pb: Vector2 = b["pos"]
+			var delta := pb - pa
+			var dist := delta.length()
+			var min_dist := COLLIDE_R * 2.0
+			if dist >= min_dist:
+				continue
+			var normal := Vector2.UP
+			if dist > 0.001:
+				normal = delta / dist
+			var push := (min_dist - dist) * 0.5
+			pa -= normal * push
+			pb += normal * push
+			a["pos"] = pa
+			b["pos"] = pb
+			var va: Vector2 = a["vel"]
+			var vb: Vector2 = b["vel"]
+			var closing := (vb - va).dot(normal)
+			if closing < 0.0:
+				var correction := normal * closing * 0.55
+				a["vel"] = va + correction
+				b["vel"] = vb - correction
+
+
+func _constrain_walls() -> void:
+	for gem in _gems:
+		_constrain_one(gem)
+
+
+func _constrain_one(gem: Dictionary) -> void:
+	var pos: Vector2 = gem["pos"]
+	var vel: Vector2 = gem["vel"]
+	if pos.x < COLLIDE_R:
+		pos.x = COLLIDE_R
+		vel.x = 0.0
+	elif pos.x > FIELD_W - COLLIDE_R:
+		pos.x = FIELD_W - COLLIDE_R
+		vel.x = 0.0
+	if pos.y > FIELD_H - COLLIDE_R:
+		pos.y = FIELD_H - COLLIDE_R
+		if vel.y > 0.0:
+			vel.y = 0.0
+		vel.x *= 0.72
+	gem["pos"] = pos
+	gem["vel"] = vel
+
+
+func _try_sleep(gem: Dictionary) -> void:
+	var vel: Vector2 = gem["vel"]
+	if vel.length() > 24.0:
+		return
+	var pos: Vector2 = gem["pos"]
+	var supported := pos.y >= FIELD_H - COLLIDE_R - 0.8
+	if not supported:
+		var gem_id := int(gem["id"])
+		for other in _gems:
+			if int(other["id"]) == gem_id:
+				continue
+			var other_pos: Vector2 = other["pos"]
+			if pos.distance_to(other_pos) > COLLIDE_R * 2.0 + 1.4:
+				continue
+			if other_pos.y >= pos.y - 3.0:
+				supported = true
+				break
+	if supported:
+		gem["vel"] = Vector2.ZERO
+
+
+func _ceiling_blocked() -> bool:
+	for gem in _gems:
+		var pos: Vector2 = gem["pos"]
+		var vel: Vector2 = gem["vel"]
+		if pos.y > COLLIDE_R * 2.15:
+			continue
+		var still_entering := pos.y < COLLIDE_R and vel.y > 30.0
+		if still_entering:
+			continue
+		if vel.length() < 80.0:
+			return true
+	return false
+
+
+func _spawn_from_top() -> void:
+	if _ceiling_blocked() or not roll_color.is_valid():
+		return
+	var x := _rng.randf_range(COLLIDE_R + 8.0, FIELD_W - COLLIDE_R - 8.0)
+	var y := -GEM_RADIUS * 0.35
+	if _overlaps(Vector2(x, y)):
+		return
+	_add_gem(int(roll_color.call()), x, y, _rng.randf_range(-16.0, 16.0), 34.0)
+
+
+func _spawn_cluster() -> void:
+	if _ceiling_blocked() or not roll_color.is_valid():
 		return
 	var color_index := int(roll_color.call())
-	var edge := _rng.randi() % 4
-	var span := FIELD_H if edge < 2 else FIELD_W
-	var lateral := _rng.randf_range(90.0, span - 90.0)
-	var jitter := _rng.randf_range(-90.0, 90.0)
-	var speed := _rng.randf_range(FLY_MIN, FLY_MIN + 40.0)
-	var count := 4 if _rng.randf() < 0.35 else 3
-	for i in count:
-		if _gems.size() >= GEM_CAP:
-			return
-		var offset := (float(i) - float(count - 1) * 0.5) * 36.0
-		_launch_gem(color_index, edge, lateral + offset, jitter, speed, 0.0)
+	var gap := COLLIDE_R * 2.0
+	var x := _rng.randf_range(COLLIDE_R + gap, FIELD_W - COLLIDE_R - gap)
+	var layout: Array[Vector2] = [
+		Vector2(0, 0),
+		Vector2(gap, 4),
+		Vector2(gap * 0.5, -gap * 0.88),
+	]
+	var base := Vector2(x, -COLLIDE_R * 0.2)
+	for offset in layout:
+		var pos := base + offset
+		if _overlaps(pos):
+			continue
+		_add_gem(color_index, pos.x, pos.y, 0.0, 32.0)
 
 
-func _launch_gem(color_index: int, edge: int, lateral: float, jitter: float, speed: float, progress: float) -> void:
-	var start := Vector2.ZERO
-	var aim := Vector2.ZERO
-	match edge:
-		0:
-			start = Vector2(-46.0, clampf(lateral, 20.0, FIELD_H - 20.0))
-			aim = Vector2(FIELD_W + 46.0, clampf(start.y + jitter, 24.0, FIELD_H - 24.0))
-		1:
-			start = Vector2(FIELD_W + 46.0, clampf(lateral, 20.0, FIELD_H - 20.0))
-			aim = Vector2(-46.0, clampf(start.y + jitter, 24.0, FIELD_H - 24.0))
-		2:
-			start = Vector2(clampf(lateral, 20.0, FIELD_W - 20.0), -46.0)
-			aim = Vector2(clampf(start.x + jitter, 24.0, FIELD_W - 24.0), FIELD_H + 46.0)
-		_:
-			start = Vector2(clampf(lateral, 20.0, FIELD_W - 20.0), FIELD_H + 46.0)
-			aim = Vector2(clampf(start.x + jitter, 24.0, FIELD_W - 24.0), -46.0)
-	var direction := aim - start
-	if direction.length_squared() < 1.0:
-		direction = Vector2.RIGHT
-	direction = direction.normalized()
-	var pos := start.lerp(aim, clampf(progress, 0.0, 0.85))
+func _seed_pile() -> void:
+	if not roll_color.is_valid():
+		return
+	var gap := COLLIDE_R * 2.0
+	var anchors: Array[Vector2] = [
+		Vector2(130, 360),
+		Vector2(310, 400),
+		Vector2(470, 340),
+		Vector2(200, 230),
+		Vector2(400, 210),
+	]
+	var layout: Array[Vector2] = [
+		Vector2(0, 0),
+		Vector2(gap, 5),
+		Vector2(gap * 0.5, -gap * 0.88),
+	]
+	for anchor in anchors:
+		var color_index := int(roll_color.call())
+		for offset in layout:
+			var pos := anchor + offset
+			pos.x = clampf(pos.x, COLLIDE_R, FIELD_W - COLLIDE_R)
+			pos.y = clampf(pos.y, COLLIDE_R, FIELD_H - COLLIDE_R)
+			if _overlaps(pos):
+				continue
+			_add_gem(color_index, pos.x, pos.y, 0.0, 36.0)
+
+
+func _overlaps(point: Vector2) -> bool:
+	for gem in _gems:
+		var pos: Vector2 = gem["pos"]
+		if point.distance_to(pos) < COLLIDE_R * 2.0 - 0.5:
+			return true
+	return false
+
+
+func _add_gem(color_index: int, x: float, y: float, vx: float, vy: float) -> void:
+	var pos := Vector2(x, y)
 	var node := Node2D.new()
 	node.position = pos
+	node.z_index = 2
 	add_child(node)
 	if _line != null:
 		move_child(node, _line.get_index())
@@ -300,14 +425,13 @@ func _launch_gem(color_index: int, edge: int, lateral: float, jitter: float, spe
 	node.add_child(gem)
 	var facet := Polygon2D.new()
 	facet.polygon = _facet_polygon()
-	facet.color = Color(1, 1, 1, 0.45)
+	facet.color = Color(1, 1, 1, 0.42)
 	node.add_child(facet)
 	_gems.append({
 		"id": _next_id,
 		"color": color_index,
 		"pos": pos,
-		"vel": direction * speed,
-		"life": progress * 1.2,
+		"vel": Vector2(vx, vy),
 		"node": node,
 		"gem": gem,
 		"base": gem.color,
@@ -315,28 +439,39 @@ func _launch_gem(color_index: int, edge: int, lateral: float, jitter: float, spe
 	_next_id += 1
 
 
-func _mark_sliced(gem: Dictionary) -> void:
-	var poly: Polygon2D = gem["gem"]
-	if is_instance_valid(poly):
-		poly.color = Color(gem["base"]).lightened(0.42)
-	var node: Node2D = gem["node"]
-	if not is_instance_valid(node):
+func _gem_by_id(id: int) -> Dictionary:
+	for gem in _gems:
+		if int(gem["id"]) == id:
+			return gem
+	return {}
+
+
+func _paint_chain() -> void:
+	var chosen := {}
+	for id in _chain_ids:
+		chosen[id] = true
+	for gem in _gems:
+		var poly: Polygon2D = gem["gem"]
+		var node: Node2D = gem["node"]
+		if not is_instance_valid(poly) or not is_instance_valid(node):
+			continue
+		if chosen.has(int(gem["id"])):
+			poly.color = Color(gem["base"]).lightened(0.4)
+			node.scale = Vector2(1.08, 1.08)
+		else:
+			poly.color = gem["base"]
+			node.scale = Vector2.ONE
+
+
+func _tint_stroke() -> void:
+	if _chain_color < 0 or _line == null:
 		return
-	var slash := Line2D.new()
-	slash.width = 4.0
-	slash.default_color = Color(1, 1, 1, 0.95)
-	slash.add_point(Vector2(-18, -14))
-	slash.add_point(Vector2(18, 14))
-	slash.z_index = 2
-	node.add_child(slash)
-	var tween := create_tween()
-	tween.tween_property(slash, "modulate:a", 0.0, 0.45)
-	tween.tween_callback(slash.queue_free)
+	_line.default_color = Rules.GEM_COLORS[_chain_color]
 
 
-func _consume_hits() -> void:
+func _consume_chain() -> void:
 	var doomed := {}
-	for id in _hit_ids:
+	for id in _chain_ids:
 		doomed[id] = true
 	var kept: Array = []
 	for gem in _gems:
@@ -345,12 +480,14 @@ func _consume_hits() -> void:
 		else:
 			kept.append(gem)
 	_gems = kept
+	_clear_chain()
 
 
 func _pop_gem(gem: Dictionary) -> void:
 	var node: Node2D = gem["node"]
 	if not is_instance_valid(node):
 		return
+	node.scale = Vector2.ONE
 	var tween := create_tween()
 	tween.set_parallel(true)
 	tween.tween_property(node, "scale", Vector2(0.05, 0.05), 0.12)
@@ -358,14 +495,9 @@ func _pop_gem(gem: Dictionary) -> void:
 	tween.chain().tween_callback(node.queue_free)
 
 
-func _restore_gems() -> void:
-	for gem in _gems:
-		var poly: Polygon2D = gem["gem"]
-		if is_instance_valid(poly):
-			poly.color = gem["base"]
-
-
 func _fade_stroke() -> void:
+	if _line == null:
+		return
 	var fading := _line
 	_line = Line2D.new()
 	_line.width = 14.0
@@ -382,38 +514,30 @@ func _fade_stroke() -> void:
 
 func _clear_stroke() -> void:
 	_stroke = PackedVector2Array()
-	_hit_ids.clear()
-	_hit_colors.clear()
-	_hit_points.clear()
-	_travel = 0.0
+	_clear_chain()
 	if _line != null:
 		_line.clear_points()
 
 
-func _distance_to_segment(point: Vector2, a: Vector2, b: Vector2) -> float:
-	var ab := b - a
-	var length_sq := ab.length_squared()
-	if length_sq < 0.001:
-		return point.distance_to(a)
-	var t := clampf((point - a).dot(ab) / length_sq, 0.0, 1.0)
-	return point.distance_to(a + ab * t)
+func _clear_chain() -> void:
+	_chain_ids.clear()
+	_chain_color = -1
+	_paint_chain()
 
 
 func _gem_polygon() -> PackedVector2Array:
-	var r := GEM_RADIUS
-	return PackedVector2Array([
-		Vector2(0, -r),
-		Vector2(r * 0.86, 0),
-		Vector2(0, r),
-		Vector2(-r * 0.86, 0),
-	])
+	var points := PackedVector2Array()
+	for i in 8:
+		var angle := TAU * float(i) / 8.0 - PI * 0.5
+		points.append(Vector2(cos(angle), sin(angle)) * GEM_RADIUS)
+	return points
 
 
 func _facet_polygon() -> PackedVector2Array:
-	var r := GEM_RADIUS
+	var radius := GEM_RADIUS * 0.42
 	return PackedVector2Array([
-		Vector2(0, -r * 0.55),
-		Vector2(r * 0.28, -r * 0.12),
-		Vector2(0, r * 0.05),
-		Vector2(-r * 0.22, -r * 0.16),
+		Vector2(0, -radius),
+		Vector2(radius * 0.7, -radius * 0.15),
+		Vector2(0, radius * 0.2),
+		Vector2(-radius * 0.55, -radius * 0.1),
 	])
