@@ -2,8 +2,9 @@ extends Control
 
 const Rules = preload("res://scripts/run_state.gd")
 const BoardView = preload("res://scripts/board_view.gd")
+const LaneView = preload("res://scripts/lane_view.gd")
 
-enum Mode { START, COMBAT, UPGRADES, WIN, LOSE }
+enum Mode { START, ROUTE, COMBAT, SHOP, REWARD, WIN, LOSE }
 
 const INK := Color("0e1116")
 const PAPER := Color("e7e4dc")
@@ -14,33 +15,46 @@ const DANGER := Color("e07a72")
 var state
 var mode := Mode.START
 var ui_lock := false
-var resolving := false
+var closing_fight := false
 
 var board
+var lane: Control
+var world: Control
+var world_base := Vector2(0, 78)
+var fx: Control
+var flash: ColorRect
+var shake := 0.0
+var flash_alpha := 0.0
+var flash_color := Color.WHITE
+
+var combat_root: Control
 var start_screen: Control
-var combat_screen: Control
-var upgrade_screen: Control
+var route_screen: Control
+var shop_screen: Control
+var reward_screen: Control
 var win_screen: Control
 var lose_screen: Control
 
-var floor_label: Label
-var enemy_label: Label
-var hp_value: Label
-var hp_track: ColorRect
-var hp_fill: ColorRect
-var moves_value: Label
+var progress_label: Label
+var hp_label: Label
+var gold_label: Label
+var combo_label: Label
+var preview_label: Label
 var action_label: Label
-var upgrade_label: Label
+var empower_label: Label
 var seed_label: Label
-var legal_label: Label
-
-var upgrade_heading: Label
-var upgrade_owned: Label
-var offer_titles: Array[Label] = []
-var offer_descs: Array[Label] = []
-
+var combo_fill: ColorRect
+var lamps: Array[ColorRect] = []
+var shop_gold: Label
+var shop_hint: Label
+var shop_box: VBoxContainer
+var reward_box: HBoxContainer
 var win_detail: Label
 var lose_detail: Label
+
+var sfx: Array[AudioStreamPlayer] = []
+var sfx_cursor := 0
+var audio_ok := true
 
 
 func _ready() -> void:
@@ -48,12 +62,40 @@ func _ready() -> void:
 	theme = _build_theme()
 	state = Rules.new()
 	_build_background()
-	_build_start()
 	_build_combat()
-	_build_upgrades()
+	_build_start()
+	_build_route()
+	_build_shop()
+	_build_reward()
 	_build_win()
 	_build_lose()
+	_build_flash()
+	_build_audio()
+	board.setup(Callable(state, "roll_color"))
+	lane.set_fx(fx)
+	board.chain_resolved.connect(_on_chain)
+	board.chain_broken.connect(_on_broken)
+	board.path_changed.connect(_on_path)
+	board.board_note.connect(_on_board_note)
+	lane.player_damaged.connect(_on_player_damaged)
+	lane.foe_killed.connect(_on_killed)
+	lane.fight_cleared.connect(_on_fight_cleared)
+	lane.spell_hit.connect(_on_spell_hit)
 	_show_start()
+
+
+func _process(delta: float) -> void:
+	_tick_shake(delta)
+	_tick_flash(delta)
+	if mode != Mode.COMBAT or closing_fight:
+		return
+	if state.combo > 0:
+		state.combo_time = maxf(state.combo_time - delta, 0.0)
+		if state.combo_time <= 0.0:
+			state.break_combo()
+			_break_juice()
+		_paint_combo()
+	lane.tick(delta)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -64,143 +106,227 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	match mode:
 		Mode.START, Mode.WIN, Mode.LOSE:
-			if key.keycode == KEY_ENTER or key.keycode == KEY_KP_ENTER or key.keycode == KEY_SPACE:
+			if _is_accept(key.keycode):
 				_start_run()
 				get_viewport().set_input_as_handled()
-		Mode.COMBAT:
-			if board.handle_key(key.keycode):
-				get_viewport().set_input_as_handled()
-		Mode.UPGRADES:
+		Mode.ROUTE:
 			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
-				_pick(0)
+				_pick_route(0)
 			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
-				_pick(1)
+				_pick_route(1)
 			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
-				_pick(2)
+				_pick_route(2)
+		Mode.REWARD:
+			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
+				_pick_reward(0)
+			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
+				_pick_reward(1)
+			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
+				_pick_reward(2)
+		Mode.SHOP:
+			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
+				_buy(0)
+			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
+				_buy(1)
+			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
+				_buy(2)
+			elif _is_accept(key.keycode):
+				_leave_shop()
 
 
 func _start_run() -> void:
 	if ui_lock:
 		return
 	ui_lock = true
-	var opened: Dictionary = state.start_run(_new_seed())
-	await _enter_combat(opened)
+	state.start_run(_new_seed())
+	closing_fight = false
+	_show_route()
 	ui_lock = false
 
 
-func _enter_combat(opened: Dictionary) -> void:
-	mode = Mode.COMBAT
-	_show_only(combat_screen)
-	board.accept_input = false
-	board.clear_selection()
-	get_viewport().gui_release_focus()
-	_refresh_hud()
-	action_label.text = "准备战斗…"
-	await _play(opened.get("steps", []))
-	_refresh_hud()
-	var outcome := str(opened.get("outcome", "continue"))
-	var message := str(opened.get("message", ""))
-	if outcome == "floor_clear":
-		action_label.text = message if message != "" else "敌人被击败"
-		_on_floor_clear()
-		return
-	action_label.text = message if message != "" else "交换相邻宝石，凑成三连。"
-	board.accept_input = true
-
-
-func _on_swap(a: Vector2i, b: Vector2i) -> void:
-	if ui_lock or resolving or mode != Mode.COMBAT:
-		return
-	resolving = true
-	board.accept_input = false
-	var result: Dictionary = state.commit_swap(a, b)
-	moves_value.text = str(state.moves_left)
-	await _play(result.get("steps", []))
-	action_label.text = str(result.get("message", ""))
-	_refresh_hud()
-	var outcome := str(result.get("outcome", "continue"))
-	resolving = false
-	if outcome == "floor_clear":
-		_on_floor_clear()
-	elif outcome == "lose":
-		_show_lose()
-	else:
-		board.accept_input = true
-
-
-func _on_floor_clear() -> void:
-	board.accept_input = false
-	if state.floor_index >= Rules.FLOORS:
-		_show_win()
-		return
-	state.roll_offers()
-	_show_upgrades()
-
-
-func _pick(index: int) -> void:
-	if ui_lock or mode != Mode.UPGRADES:
+func _pick_route(index: int) -> void:
+	if ui_lock or mode != Mode.ROUTE:
 		return
 	ui_lock = true
-	if not state.choose_upgrade(index):
-		ui_lock = false
-		return
-	var opened: Dictionary = state.begin_floor()
-	await _enter_combat(opened)
+	state.choose_route(index)
+	_enter_node()
 	ui_lock = false
 
 
-func _play(steps: Array) -> void:
-	for step in steps:
-		var kind := str(step.get("kind", ""))
-		if kind == "clear" or kind == "bomb":
-			board.highlight(step.get("matched", []))
-			var dealt := int(step.get("damage", 0))
-			var cascade := int(step.get("cascade", 0))
-			if kind == "bomb":
-				action_label.text = "开场爆弹造成 %d 点伤害" % dealt
-			elif cascade > 0:
-				action_label.text = "连锁 %d · 造成 %d 点伤害" % [cascade, dealt]
-			else:
-				action_label.text = "造成 %d 点伤害" % dealt
-			_set_hp(int(step.get("enemy_hp", state.enemy_hp)))
-			await get_tree().create_timer(0.2).timeout
-		elif kind == "board":
-			board.show_cells(step.get("board", []))
-			if step.has("enemy_hp"):
-				_set_hp(int(step["enemy_hp"]))
-			var note := str(step.get("message", ""))
-			if note != "":
-				action_label.text = note
-			var delay := float(step.get("delay", 0.12))
-			await get_tree().create_timer(delay).timeout
-		elif kind == "message":
-			action_label.text = str(step.get("text", ""))
-	board.clear_highlight()
+func _enter_node() -> void:
+	if state.route_done():
+		_show_win()
+		return
+	match state.current_kind():
+		"trash", "elite", "boss":
+			_start_fight()
+		"shop":
+			_open_shop()
+		"reward":
+			_open_reward()
+		_:
+			_show_win()
 
 
-func _refresh_hud() -> void:
-	floor_label.text = "第 %d / %d 层" % [state.floor_index, Rules.FLOORS]
-	enemy_label.text = state.enemy_name
-	moves_value.text = str(state.moves_left)
-	upgrade_label.text = state.upgrade_summary()
-	seed_label.text = "种子  %d" % state.seed_value
-	legal_label.text = "可消除的交换  %d" % state.list_moves().size()
-	_set_hp(state.enemy_hp)
+func _start_fight() -> void:
+	mode = Mode.COMBAT
+	closing_fight = false
+	state.break_combo()
+	_show_only(combat_root)
+	board.refill()
+	board.accept_input = true
+	lane.freeze_bonus = state.freeze_bonus
+	lane.summon_bonus = state.summon_bonus
+	lane.begin_fight(state.current_kind(), state.trash_variant(), state.hp, state.max_hp)
+	action_label.text = "敌人从下方走上来。划同色宝石来施法。"
+	preview_label.text = "按住同色宝石划线，上下左右，至少 3 颗"
+	_refresh_hud()
+	get_viewport().gui_release_focus()
 
 
-func _set_hp(hp: int) -> void:
-	var maximum := maxi(state.enemy_max_hp, 1)
-	hp_value.text = "%d / %d" % [hp, state.enemy_max_hp]
-	var width := hp_track.size.x
-	if width < 2.0:
-		width = hp_track.custom_minimum_size.x
-	var height := hp_track.size.y
-	if height < 2.0:
-		height = hp_track.custom_minimum_size.y
-	var ratio := clampf(float(hp) / float(maximum), 0.0, 1.0)
-	hp_fill.size = Vector2(width * ratio, height)
-	hp_fill.position = Vector2.ZERO
-	hp_fill.color = Color("d4544a") if ratio > 0.35 else Color("e0a24a")
+func _on_chain(color_index: int, length: int, origin: Vector2) -> void:
+	if mode != Mode.COMBAT:
+		return
+	var school := str(state.school_of(color_index))
+	var empowered := bool(state.empower_next) and school != "white"
+	state.note_chain_success()
+	var kind := str(state.spell_kind(school, length))
+	var title := str(state.spell_title(school, length))
+	if school == "white":
+		var text := str(state.apply_white(kind))
+		if kind == "extra":
+			lane.apply_global_slow(1.6)
+		action_label.text = text
+		_spark(origin, Rules.GEM_COLORS[4])
+	else:
+		var damage := float(state.chain_damage(length, state.combo, empowered))
+		if empowered:
+			state.empower_next = false
+		lane.cast(school, kind, damage, origin, empowered)
+		action_label.text = "%s  ·  %d" % [title, int(round(damage))]
+		if length >= Rules.SUPER_AT:
+			action_label.text += "  ·  大招"
+	_success_juice(color_index)
+	_refresh_hud()
+
+
+func _on_broken() -> void:
+	if state.combo > 0:
+		state.break_combo()
+		_break_juice()
+	preview_label.text = "不足 3 颗，连击中断"
+	_refresh_hud()
+
+
+func _on_path(color_index: int, length: int) -> void:
+	if length <= 0 or color_index < 0:
+		return
+	var school := str(state.school_of(color_index))
+	if length < Rules.MIN_CHAIN:
+		preview_label.text = "%s  %d / 3" % [state.school_name(color_index), length]
+		return
+	if school == "white":
+		preview_label.text = "白宝石  ·  %d 连  ·  %s" % [length, state.spell_title(school, length)]
+		return
+	var empowered := bool(state.empower_next)
+	var damage := float(state.chain_damage(length, state.combo + 1, empowered))
+	preview_label.text = "%s  ·  %d 连  ·  ×%.2f  ·  预计 %d%s" % [
+		state.spell_title(school, length),
+		length,
+		state.length_multiplier(length),
+		int(round(damage)),
+		"  ·  已强化" if empowered else "",
+	]
+
+
+func _on_board_note(text: String) -> void:
+	action_label.text = text
+
+
+func _on_player_damaged(amount: int) -> void:
+	if mode != Mode.COMBAT or state.hp <= 0:
+		return
+	state.hp = maxi(state.hp - amount, 0)
+	lane.set_player_hp(state.hp, state.max_hp)
+	shake = maxf(shake, 6.0)
+	_refresh_hud()
+	if state.hp <= 0:
+		board.accept_input = false
+		lane.stop()
+		_show_lose()
+
+
+func _on_killed(gold: int) -> void:
+	state.gold += gold
+	_refresh_hud()
+	_play_tone(660.0, 0.07, 0.22)
+
+
+func _on_fight_cleared() -> void:
+	if mode != Mode.COMBAT or state.hp <= 0 or closing_fight:
+		return
+	closing_fight = true
+	board.accept_input = false
+	action_label.text = "这一关清完了"
+	await get_tree().create_timer(0.7).timeout
+	closing_fight = false
+	if mode != Mode.COMBAT or state.hp <= 0:
+		return
+	if state.current_kind() == "boss":
+		_show_win()
+		return
+	state.advance()
+	_enter_node()
+
+
+func _on_spell_hit(_school: String) -> void:
+	shake = maxf(shake, 2.5)
+	_play_tone(210.0, 0.04, 0.16)
+
+
+func _open_shop() -> void:
+	mode = Mode.SHOP
+	state.roll_shop()
+	_rebuild_shop()
+	_show_only(shop_screen)
+
+
+func _buy(index: int) -> void:
+	if mode != Mode.SHOP or index < 0 or index >= state.shop_stock.size():
+		return
+	var id := str(state.shop_stock[index])
+	if id == "":
+		return
+	if not state.apply_shop(id):
+		shop_hint.text = "金币不足"
+		return
+	state.shop_stock[index] = ""
+	_rebuild_shop()
+	lane.set_player_hp(state.hp, state.max_hp)
+
+
+func _leave_shop() -> void:
+	if mode != Mode.SHOP:
+		return
+	state.advance()
+	_enter_node()
+
+
+func _open_reward() -> void:
+	mode = Mode.REWARD
+	state.roll_reward()
+	_rebuild_reward()
+	_show_only(reward_screen)
+
+
+func _pick_reward(index: int) -> void:
+	if ui_lock or mode != Mode.REWARD or index < 0 or index >= state.reward_stock.size():
+		return
+	ui_lock = true
+	state.apply_reward(str(state.reward_stock[index]))
+	state.advance()
+	_enter_node()
+	ui_lock = false
 
 
 func _show_start() -> void:
@@ -208,39 +334,116 @@ func _show_start() -> void:
 	_show_only(start_screen)
 
 
-func _show_upgrades() -> void:
-	mode = Mode.UPGRADES
-	upgrade_heading.text = "第 %d 层已清除" % state.floor_index
-	upgrade_owned.text = "已有强化：%s" % state.upgrade_summary()
-	for i in offer_titles.size():
-		var info: Dictionary = state.offer[i]
-		offer_titles[i].text = str(info["name"])
-		offer_descs[i].text = str(info["desc"])
-	_show_only(upgrade_screen)
-	get_viewport().gui_release_focus()
+func _show_route() -> void:
+	mode = Mode.ROUTE
+	_show_only(route_screen)
 
 
 func _show_win() -> void:
 	mode = Mode.WIN
-	win_detail.text = "五层守关人尽数倒下。\n种子  %d\n强化  %s" % [state.seed_value, state.upgrade_summary()]
+	board.accept_input = false
+	lane.stop()
+	win_detail.text = "你走完了%s。\n种子  %d\n剩余生命  %d\n金币  %d" % [
+		state.route_name(), state.seed_value, state.hp, state.gold,
+	]
 	_show_only(win_screen)
 
 
 func _show_lose() -> void:
 	mode = Mode.LOSE
-	lose_detail.text = "止步于第 %d 层 · %s\n还剩 %d 点气血\n种子  %d" % [
-		state.floor_index,
-		state.enemy_name,
-		state.enemy_hp,
-		state.seed_value,
+	board.accept_input = false
+	lane.stop()
+	lose_detail.text = "倒在%s的%s。\n种子  %d\n金币  %d" % [
+		state.route_name(), Rules.node_title(state.current_kind()), state.seed_value, state.gold,
 	]
 	_show_only(lose_screen)
 
 
 func _show_only(which: Control) -> void:
-	for screen in [start_screen, combat_screen, upgrade_screen, win_screen, lose_screen]:
+	for screen in [start_screen, route_screen, combat_root, shop_screen, reward_screen, win_screen, lose_screen]:
 		screen.visible = screen == which
-	board.accept_input = false
+
+
+func _refresh_hud() -> void:
+	progress_label.text = state.progress_text()
+	hp_label.text = "生命  %d / %d" % [state.hp, state.max_hp]
+	gold_label.text = "金币  %d" % state.gold
+	seed_label.text = "种子 %d" % state.seed_value
+	empower_label.text = "下一发已强化" if state.empower_next else ""
+	_paint_combo()
+
+
+func _paint_combo() -> void:
+	if state.combo <= 0:
+		combo_label.text = "连击  0"
+		combo_fill.size.x = 0
+	else:
+		var bonus := int(round((state.combo_multiplier(state.combo) - 1.0) * 100.0))
+		combo_label.text = "连击  x%d    伤害 +%d%%" % [state.combo, bonus]
+		var window := maxf(state.combo_window(), 0.1)
+		combo_fill.size.x = 220.0 * clampf(state.combo_time / window, 0.0, 1.0)
+	for i in lamps.size():
+		var on: bool = i < state.combo
+		lamps[i].color = Color("f0d7a2") if on else Color("2a303c")
+		if on and state.combo >= 5:
+			lamps[i].modulate = Color(1.2, 1.05, 0.7)
+		else:
+			lamps[i].modulate = Color.WHITE
+
+
+func _success_juice(color_index: int) -> void:
+	var level := int(state.combo)
+	shake = 3.0 + float(mini(level, 10)) * 1.15
+	flash_alpha = 0.14 + float(mini(level, 8)) * 0.04
+	flash_color = Rules.GEM_COLORS[clampi(color_index, 0, Rules.GEM_COLORS.size() - 1)]
+	var pitch := 480.0 + float(level) * 42.0
+	_play_tone(pitch, 0.07, 0.34)
+	_play_tone(pitch * 1.25, 0.08, 0.26)
+	if level >= 3:
+		_play_tone(pitch * 1.5, 0.1, 0.28)
+	if level >= 5:
+		_play_tone(pitch * 1.9, 0.14, 0.24)
+	if level >= 8:
+		shake += 6.0
+		flash_alpha += 0.12
+
+
+func _break_juice() -> void:
+	shake = maxf(shake, 2.0)
+	flash_alpha = maxf(flash_alpha, 0.12)
+	flash_color = Color("6e3030")
+	_play_tone(130.0, 0.11, 0.28)
+
+
+func _spark(origin: Vector2, color: Color) -> void:
+	var gem := Polygon2D.new()
+	gem.polygon = PackedVector2Array([
+		Vector2(0, -12), Vector2(12, 0), Vector2(0, 12), Vector2(-12, 0),
+	])
+	gem.color = color
+	var holder := Node2D.new()
+	holder.add_child(gem)
+	fx.add_child(holder)
+	holder.global_position = origin
+	var dest := lane.global_position + Vector2(LaneView.LANE_W * 0.5, 58)
+	var tween := create_tween()
+	tween.tween_property(holder, "global_position", dest, 0.28)
+	tween.tween_callback(holder.queue_free)
+
+
+func _tick_shake(delta: float) -> void:
+	if shake > 0.0:
+		world.position = world_base + Vector2(randf_range(-shake, shake), randf_range(-shake, shake))
+		shake = maxf(shake - delta * 28.0, 0.0)
+	else:
+		world.position = world_base
+
+
+func _tick_flash(delta: float) -> void:
+	if flash_alpha > 0.0:
+		flash_alpha = maxf(flash_alpha - delta * 1.35, 0.0)
+	flash.color = flash_color
+	flash.modulate.a = flash_alpha
 
 
 func _build_background() -> void:
@@ -248,191 +451,270 @@ func _build_background() -> void:
 	background.color = INK
 	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	background.set_anchors_preset(Control.PRESET_FULL_RECT)
-	background.offset_right = 0
-	background.offset_bottom = 0
 	add_child(background)
+
+
+func _build_combat() -> void:
+	combat_root = Control.new()
+	_cover(combat_root)
+	combat_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(combat_root)
+
+	var hud := PanelContainer.new()
+	hud.position = Vector2(16, 10)
+	hud.size = Vector2(1248, 64)
+	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var hud_style := StyleBoxFlat.new()
+	hud_style.bg_color = Color("161b24")
+	hud_style.set_corner_radius_all(12)
+	hud_style.content_margin_left = 14
+	hud_style.content_margin_right = 14
+	hud_style.content_margin_top = 6
+	hud_style.content_margin_bottom = 6
+	hud.add_theme_stylebox_override("panel", hud_style)
+	combat_root.add_child(hud)
+	var hud_box := VBoxContainer.new()
+	hud_box.add_theme_constant_override("separation", 2)
+	hud.add_child(hud_box)
+	var top := HBoxContainer.new()
+	top.add_theme_constant_override("separation", 18)
+	hud_box.add_child(top)
+	progress_label = _label("路线", 16, GOLD)
+	hp_label = _label("生命", 16, PAPER)
+	gold_label = _label("金币", 16, PAPER)
+	seed_label = _label("种子", 14, MUTED)
+	top.add_child(progress_label)
+	top.add_child(hp_label)
+	top.add_child(gold_label)
+	top.add_child(seed_label)
+	var bottom := HBoxContainer.new()
+	bottom.add_theme_constant_override("separation", 12)
+	hud_box.add_child(bottom)
+	combo_label = _label("连击  0", 15, GOLD)
+	bottom.add_child(combo_label)
+	var timer_track := ColorRect.new()
+	timer_track.custom_minimum_size = Vector2(220, 8)
+	timer_track.color = Color("2a303c")
+	timer_track.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	combo_fill = ColorRect.new()
+	combo_fill.color = Color("f0d7a2")
+	combo_fill.size = Vector2(0, 8)
+	combo_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	timer_track.add_child(combo_fill)
+	bottom.add_child(timer_track)
+	for _i in 8:
+		var lamp := ColorRect.new()
+		lamp.custom_minimum_size = Vector2(14, 14)
+		lamp.color = Color("2a303c")
+		lamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		bottom.add_child(lamp)
+		lamps.append(lamp)
+	empower_label = _label("", 15, Color("fff1b8"))
+	bottom.add_child(empower_label)
+
+	world = Control.new()
+	world.position = world_base
+	world.size = Vector2(1280, 710)
+	world.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	combat_root.add_child(world)
+
+	board = BoardView.new()
+	board.position = Vector2(50, 8)
+	world.add_child(board)
+	lane = LaneView.new()
+	lane.position = Vector2(660, 4)
+	world.add_child(lane)
+
+	preview_label = _label("按住同色宝石划线，上下左右，至少 3 颗", 16, PAPER, true)
+	preview_label.position = Vector2(50, 530)
+	preview_label.size = Vector2(520, 48)
+	world.add_child(preview_label)
+	action_label = _label("", 18, GOLD, true)
+	action_label.position = Vector2(50, 578)
+	action_label.size = Vector2(520, 48)
+	world.add_child(action_label)
+	var legend := _label("红 火焰    蓝 寒冰    绿 藤蔓    紫 雷电    白 奖励", 14, MUTED)
+	legend.position = Vector2(50, 632)
+	world.add_child(legend)
+
+	fx = Control.new()
+	_cover(fx)
+	fx.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	combat_root.add_child(fx)
 
 
 func _build_start() -> void:
 	start_screen = _full_center()
-	var panel := _card_panel(Color("161b24"))
+	var panel := _card(Color("161b24"))
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 12)
-	box.custom_minimum_size = Vector2(560, 0)
+	box.add_theme_constant_override("separation", 10)
+	box.custom_minimum_size = Vector2(620, 0)
 	panel.add_child(box)
-	start_screen.add_child(panel)
-
-	var title := _label("消消乐 Rogue", 42, GOLD)
+	var title := _label("消消乐 Rogue", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	var sub := _label("五层试炼 · 三消对决", 18, MUTED)
+	var sub := _label("左边划宝石，右边打一条路", 18, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"用三消击败每一层的敌人。步数耗尽之前打空气血，才能进入下一层。\n\n· 点击或拖拽，交换两颗相邻宝石\n· 只有形成 3 连及以上，交换才会生效并消耗 1 步\n· 宝石下落并补齐；若再次连成三消，连锁会继续造成伤害\n· 4 连和更长的消除伤害更高\n\n共 5 层。每通关一层，从 3 项强化里选 1 项，效果保留到本局结束。新的一局会重新抽取种子和强化。",
+		"按住鼠标，在相邻的同色宝石上划线。只能上下左右，可以转弯，不能斜着连。至少 3 颗才算成功。第 4 颗起，每多 1 颗伤害 ×1.15。连到 6 颗会施放该颜色的大招。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。法术会从划线飞到赛道上。连击越高，增伤、闪屏和声音越猛；划断或停太久，连击就掉。",
 		16,
 		PAPER,
 		true
 	)
-	rules.custom_minimum_size = Vector2(520, 0)
+	rules.custom_minimum_size = Vector2(580, 0)
 	box.add_child(rules)
-	var button := _button("开始试炼")
-	button.custom_minimum_size = Vector2(220, 52)
+	var button := _button("选择路线")
 	button.pressed.connect(_start_run)
 	box.add_child(button)
 	var hint := _label("回车或空格也可以开始", 14, MUTED)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(hint)
+	start_screen.add_child(panel)
 	add_child(start_screen)
 
 
-func _build_combat() -> void:
-	combat_screen = MarginContainer.new()
-	_cover(combat_screen)
-	for side in ["margin_left", "margin_right", "margin_top", "margin_bottom"]:
-		combat_screen.add_theme_constant_override(side, 24)
-
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 28)
-	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	combat_screen.add_child(row)
-
-	var scroll := ScrollContainer.new()
-	scroll.custom_minimum_size = Vector2(300, 0)
-	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
-	row.add_child(scroll)
-
-	var side_panel := _card_panel(Color("161b24"))
-	side_panel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	scroll.add_child(side_panel)
-
-	var side_box := VBoxContainer.new()
-	side_box.add_theme_constant_override("separation", 6)
-	side_panel.add_child(side_box)
-
-	var title := _label("消消乐 Rogue", 26, GOLD)
-	side_box.add_child(title)
-	seed_label = _label("种子", 14, MUTED)
-	side_box.add_child(seed_label)
-	side_box.add_child(_gap(8))
-
-	floor_label = _label("第 1 / 5 层", 22, PAPER)
-	side_box.add_child(floor_label)
-	enemy_label = _label("山门小贼", 20, GOLD)
-	side_box.add_child(enemy_label)
-	side_box.add_child(_label("气血", 14, MUTED))
-	hp_track = ColorRect.new()
-	hp_track.custom_minimum_size = Vector2(260, 16)
-	hp_track.color = Color("2a303c")
-	hp_track.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	hp_track.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hp_fill = ColorRect.new()
-	hp_fill.color = Color("d4544a")
-	hp_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	hp_fill.size = Vector2(260, 16)
-	hp_track.add_child(hp_fill)
-	hp_track.resized.connect(_refresh_hp_bar)
-	side_box.add_child(hp_track)
-	hp_value = _label("0 / 0", 16, PAPER)
-	side_box.add_child(hp_value)
-	side_box.add_child(_gap(8))
-
-	side_box.add_child(_label("剩余步数", 14, MUTED))
-	moves_value = _label("0", 40, PAPER)
-	side_box.add_child(moves_value)
-	legal_label = _label("可消除的交换  0", 14, MUTED)
-	side_box.add_child(legal_label)
-	side_box.add_child(_gap(8))
-
-	side_box.add_child(_label("战报", 14, MUTED))
-	action_label = _label("交换相邻宝石，凑成三连。", 16, PAPER, true)
-	action_label.custom_minimum_size = Vector2(250, 0)
-	side_box.add_child(action_label)
-	side_box.add_child(_gap(8))
-
-	side_box.add_child(_label("已获得强化", 14, MUTED))
-	upgrade_label = _label("无", 16, GOLD, true)
-	upgrade_label.custom_minimum_size = Vector2(250, 0)
-	side_box.add_child(upgrade_label)
-	side_box.add_child(_gap(10))
-	var help := _label("鼠标点击两颗相邻宝石，或拖向相邻格。\n方向键移动光标，空格或回车确认。\n不能消除的交换会弹回，不扣步。", 14, MUTED, true)
-	help.custom_minimum_size = Vector2(250, 0)
-	side_box.add_child(help)
-
-	var right := CenterContainer.new()
-	right.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	right.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	row.add_child(right)
-	board = BoardView.new()
-	board.swap_requested.connect(_on_swap)
-	right.add_child(board)
-	add_child(combat_screen)
-
-
-func _build_upgrades() -> void:
-	upgrade_screen = _full_center()
+func _build_route() -> void:
+	route_screen = _full_center()
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 16)
-	box.alignment = BoxContainer.ALIGNMENT_CENTER
-	upgrade_screen.add_child(box)
-
-	upgrade_heading = _label("第 1 层已清除", 36, GOLD)
-	upgrade_heading.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(upgrade_heading)
-	var sub := _label("选择一项强化，效果持续到本局结束", 18, PAPER)
+	box.add_theme_constant_override("separation", 14)
+	route_screen.add_child(box)
+	var title := _label("选择一条路线", 36, GOLD)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(title)
+	var sub := _label("三条路都按顺序走完，没有地图。", 16, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
-	upgrade_owned = _label("已有强化：无", 15, MUTED)
-	upgrade_owned.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(upgrade_owned)
-
-	var cards := HBoxContainer.new()
-	cards.add_theme_constant_override("separation", 18)
-	cards.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_child(cards)
-	for i in 3:
-		cards.add_child(_offer_card(i))
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 16)
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_child(row)
+	var tints: Array[Color] = [Color("243044"), Color("3a3224"), Color("24362f")]
+	for i in Rules.ROUTES.size():
+		var info: Dictionary = Rules.ROUTES[i]
+		var panel := _card(tints[i])
+		panel.custom_minimum_size = Vector2(280, 280)
+		var inner := VBoxContainer.new()
+		inner.add_theme_constant_override("separation", 8)
+		panel.add_child(inner)
+		var name := _label(str(info["name"]), 24, GOLD)
+		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		inner.add_child(name)
+		var blurb := _label(str(info["blurb"]), 15, PAPER, true)
+		blurb.custom_minimum_size = Vector2(240, 48)
+		inner.add_child(blurb)
+		var steps := _label(Rules.route_steps_text(i), 14, MUTED, true)
+		steps.custom_minimum_size = Vector2(240, 72)
+		inner.add_child(steps)
+		var button := _button("走这条")
+		button.pressed.connect(_pick_route.bind(i))
+		inner.add_child(button)
+		row.add_child(panel)
 	var hint := _label("按 1 / 2 / 3 选择", 14, MUTED)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(hint)
-	add_child(upgrade_screen)
+	add_child(route_screen)
 
 
-func _offer_card(index: int) -> PanelContainer:
-	var tints: Array[Color] = [Color("243044"), Color("24362f"), Color("3a3224")]
-	var panel := _card_panel(tints[index])
-	panel.custom_minimum_size = Vector2(250, 250)
+func _build_shop() -> void:
+	shop_screen = _full_center()
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 10)
-	box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	box.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	panel.add_child(box)
-	var title := _label("强化", 22, GOLD)
+	box.add_theme_constant_override("separation", 12)
+	shop_screen.add_child(box)
+	var title := _label("商店", 36, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	var desc := _label("", 15, PAPER, true)
-	desc.custom_minimum_size = Vector2(210, 96)
-	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	desc.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	box.add_child(title)
-	box.add_child(desc)
-	var button := _button("选择")
-	button.pressed.connect(_pick.bind(index))
-	box.add_child(button)
-	offer_titles.append(title)
-	offer_descs.append(desc)
-	return panel
+	shop_gold = _label("金币  0", 18, PAPER)
+	shop_gold.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(shop_gold)
+	shop_box = VBoxContainer.new()
+	shop_box.add_theme_constant_override("separation", 8)
+	shop_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_child(shop_box)
+	shop_hint = _label("", 15, DANGER)
+	shop_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(shop_hint)
+	var leave := _button("离开商店")
+	leave.pressed.connect(_leave_shop)
+	box.add_child(leave)
+	var hint := _label("1 / 2 / 3 购买，回车离开", 14, MUTED)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(hint)
+	add_child(shop_screen)
+
+
+func _rebuild_shop() -> void:
+	shop_gold.text = "金币  %d    生命  %d / %d" % [state.gold, state.hp, state.max_hp]
+	shop_hint.text = ""
+	for child in shop_box.get_children():
+		child.queue_free()
+	for i in state.shop_stock.size():
+		var id := str(state.shop_stock[i])
+		var button := _button("")
+		button.custom_minimum_size = Vector2(520, 52)
+		if id == "" or not Rules.SHOP.has(id):
+			button.text = "已购买"
+			button.disabled = true
+		else:
+			var info: Dictionary = Rules.SHOP[id]
+			button.text = "%s    %d 金    %s" % [info["name"], int(info["price"]), info["desc"]]
+			button.pressed.connect(_buy.bind(i))
+		shop_box.add_child(button)
+
+
+func _build_reward() -> void:
+	reward_screen = _full_center()
+	var box := VBoxContainer.new()
+	box.add_theme_constant_override("separation", 12)
+	reward_screen.add_child(box)
+	var title := _label("选择一项奖赏", 36, GOLD)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(title)
+	var sub := _label("效果保留到这局结束", 16, MUTED)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(sub)
+	reward_box = HBoxContainer.new()
+	reward_box.add_theme_constant_override("separation", 16)
+	reward_box.alignment = BoxContainer.ALIGNMENT_CENTER
+	box.add_child(reward_box)
+	var hint := _label("按 1 / 2 / 3 选择", 14, MUTED)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(hint)
+	add_child(reward_screen)
+
+
+func _rebuild_reward() -> void:
+	for child in reward_box.get_children():
+		child.queue_free()
+	var tints: Array[Color] = [Color("243044"), Color("24362f"), Color("3a3224")]
+	for i in state.reward_stock.size():
+		var id := str(state.reward_stock[i])
+		var info: Dictionary = Rules.REWARDS[id]
+		var panel := _card(tints[i % tints.size()])
+		panel.custom_minimum_size = Vector2(250, 220)
+		var inner := VBoxContainer.new()
+		inner.add_theme_constant_override("separation", 8)
+		panel.add_child(inner)
+		var name := _label(str(info["name"]), 22, GOLD)
+		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		inner.add_child(name)
+		var desc := _label(str(info["desc"]), 15, PAPER, true)
+		desc.custom_minimum_size = Vector2(210, 72)
+		inner.add_child(desc)
+		var button := _button("拿走")
+		button.pressed.connect(_pick_reward.bind(i))
+		inner.add_child(button)
+		reward_box.add_child(panel)
 
 
 func _build_win() -> void:
 	win_screen = _full_center()
-	var panel := _card_panel(Color("161b24"))
+	var panel := _card(Color("161b24"))
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 14)
+	box.add_theme_constant_override("separation", 12)
 	box.custom_minimum_size = Vector2(460, 0)
 	panel.add_child(box)
-	var title := _label("试炼通关", 40, GOLD)
+	var title := _label("路线清空", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
 	win_detail = _label("", 18, PAPER, true)
@@ -442,21 +724,18 @@ func _build_win() -> void:
 	var button := _button("再来一局")
 	button.pressed.connect(_start_run)
 	box.add_child(button)
-	var hint := _label("回车或空格再开一局", 14, MUTED)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(hint)
 	win_screen.add_child(panel)
 	add_child(win_screen)
 
 
 func _build_lose() -> void:
 	lose_screen = _full_center()
-	var panel := _card_panel(Color("161b24"))
+	var panel := _card(Color("161b24"))
 	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 14)
+	box.add_theme_constant_override("separation", 12)
 	box.custom_minimum_size = Vector2(460, 0)
 	panel.add_child(box)
-	var title := _label("步数耗尽", 40, DANGER)
+	var title := _label("你倒下了", 40, DANGER)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
 	lose_detail = _label("", 18, PAPER, true)
@@ -466,20 +745,60 @@ func _build_lose() -> void:
 	var button := _button("再来一局")
 	button.pressed.connect(_start_run)
 	box.add_child(button)
-	var hint := _label("回车或空格再开一局", 14, MUTED)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(hint)
 	lose_screen.add_child(panel)
 	add_child(lose_screen)
 
 
-func _refresh_hp_bar() -> void:
-	if state == null or hp_value == null:
+func _build_flash() -> void:
+	flash = ColorRect.new()
+	_cover(flash)
+	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	flash.color = Color.WHITE
+	flash.modulate.a = 0.0
+	add_child(flash)
+
+
+func _build_audio() -> void:
+	for _i in 6:
+		var player := AudioStreamPlayer.new()
+		player.volume_db = -6.0
+		add_child(player)
+		sfx.append(player)
+
+
+func _play_tone(freq: float, duration: float, volume: float) -> void:
+	if not audio_ok or sfx.is_empty():
 		return
-	var parts := hp_value.text.split(" / ")
-	if parts.size() != 2:
+	var stream := _beep(freq, duration, volume)
+	if stream == null:
+		audio_ok = false
 		return
-	_set_hp(int(parts[0]))
+	var player := sfx[sfx_cursor % sfx.size()]
+	sfx_cursor += 1
+	player.stream = stream
+	player.play()
+
+
+func _beep(freq: float, duration: float, volume: float) -> AudioStreamWAV:
+	var rate := 22050
+	var count := int(float(rate) * duration)
+	if count < 1:
+		return null
+	var data := PackedByteArray()
+	data.resize(count * 2)
+	for i in count:
+		var t := float(i) / float(rate)
+		var env := 1.0 - float(i) / float(count)
+		var sample := int(sin(t * freq * TAU) * env * volume * 32000.0)
+		data[i * 2] = sample & 255
+		data[i * 2 + 1] = (sample >> 8) & 255
+	var stream := AudioStreamWAV.new()
+	stream.format = AudioStreamWAV.FORMAT_16_BITS
+	stream.mix_rate = rate
+	stream.stereo = false
+	stream.loop_mode = AudioStreamWAV.LOOP_DISABLED
+	stream.data = data
+	return stream
 
 
 func _full_center() -> CenterContainer:
@@ -498,15 +817,15 @@ func _cover(node: Control) -> void:
 	node.grow_vertical = Control.GROW_DIRECTION_BOTH
 
 
-func _card_panel(color: Color) -> PanelContainer:
+func _card(color: Color) -> PanelContainer:
 	var panel := PanelContainer.new()
 	var style := StyleBoxFlat.new()
 	style.bg_color = color
 	style.set_corner_radius_all(16)
-	style.content_margin_left = 20
-	style.content_margin_right = 20
-	style.content_margin_top = 18
-	style.content_margin_bottom = 18
+	style.content_margin_left = 18
+	style.content_margin_right = 18
+	style.content_margin_top = 16
+	style.content_margin_bottom = 16
 	panel.add_theme_stylebox_override("panel", style)
 	return panel
 
@@ -524,13 +843,13 @@ func _label(text: String, size: int, color: Color, wrap: bool = false) -> Label:
 func _button(text: String) -> Button:
 	var button := Button.new()
 	button.text = text
-	button.add_theme_font_size_override("font_size", 18)
-	button.custom_minimum_size = Vector2(0, 46)
+	button.add_theme_font_size_override("font_size", 16)
+	button.custom_minimum_size = Vector2(0, 44)
 	var normal := StyleBoxFlat.new()
 	normal.bg_color = Color("2c384c")
 	normal.set_corner_radius_all(10)
-	normal.content_margin_left = 16
-	normal.content_margin_right = 16
+	normal.content_margin_left = 14
+	normal.content_margin_right = 14
 	normal.content_margin_top = 8
 	normal.content_margin_bottom = 8
 	var hover := normal.duplicate() as StyleBoxFlat
@@ -548,20 +867,12 @@ func _button(text: String) -> Button:
 	return button
 
 
-func _gap(height: int) -> Control:
-	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, height)
-	return spacer
-
-
 func _build_theme() -> Theme:
 	var theme := Theme.new()
 	theme.default_font = _make_font()
 	theme.default_font_size = 18
 	theme.set_color("font_color", "Label", PAPER)
 	theme.set_color("font_color", "Button", PAPER)
-	theme.set_color("font_hover_color", "Button", Color.WHITE)
-	theme.set_color("font_pressed_color", "Button", PAPER)
 	return theme
 
 
@@ -598,6 +909,8 @@ func _new_seed() -> int:
 	var roller := RandomNumberGenerator.new()
 	roller.randomize()
 	var value := int(roller.randi() & 0x7fffffff)
-	if value == 0:
-		value = 1
-	return value
+	return value if value != 0 else 1
+
+
+func _is_accept(code: Key) -> bool:
+	return code == KEY_ENTER or code == KEY_KP_ENTER or code == KEY_SPACE

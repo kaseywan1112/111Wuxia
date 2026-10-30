@@ -1,39 +1,40 @@
 extends Control
 
-const SIZE := 8
-const TILE := 62
-const GAP := 6
+const Rules = preload("res://scripts/run_state.gd")
+
+const COLS := 8
+const ROWS := 8
+const TILE := 56
+const GAP := 5
 const PAD := 12
+const STRIDE := TILE + GAP
 
-const GEM_COLORS: Array[Color] = [
-	Color("e85d4c"),
-	Color("f0a202"),
-	Color("7bc67e"),
-	Color("3d9ee0"),
-	Color("b07be0"),
-]
-
-signal swap_requested(a: Vector2i, b: Vector2i)
+signal chain_resolved(color_index: int, length: int, origin: Vector2)
+signal chain_broken
+signal path_changed(color_index: int, length: int)
+signal board_note(text: String)
 
 var accept_input := false
-var colors: Array = []
-var selected := Vector2i(-1, -1)
-var cursor := Vector2i(0, 0)
-var highlighted: Array[Vector2i] = []
+var colors: Array[int] = []
+var path: Array = []
+var drawing := false
+var roll_color: Callable = Callable()
 
 var _wells: Array[ColorRect] = []
 var _gems: Array[Polygon2D] = []
 var _facets: Array[Polygon2D] = []
-var _press_cell := Vector2i(-1, -1)
-var _press_pos := Vector2.ZERO
-var _drag_sent := false
+var _line: Line2D
+var _falling := false
 
 
 func _ready() -> void:
 	var pixel := _pixel_size()
 	custom_minimum_size = Vector2(pixel, pixel)
+	size = custom_minimum_size
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	clip_contents = true
+	colors.resize(COLS * ROWS)
+	colors.fill(-1)
 
 	var background := ColorRect.new()
 	background.color = Color("12161e")
@@ -45,8 +46,8 @@ func _ready() -> void:
 	background.offset_bottom = 0
 	add_child(background)
 
-	for y in SIZE:
-		for x in SIZE:
+	for y in ROWS:
+		for x in COLS:
 			var well := ColorRect.new()
 			well.mouse_filter = Control.MOUSE_FILTER_IGNORE
 			well.position = _origin(x, y)
@@ -58,7 +59,7 @@ func _ready() -> void:
 			var gem := Polygon2D.new()
 			gem.position = _origin(x, y)
 			gem.polygon = _gem_polygon()
-			gem.color = GEM_COLORS[0]
+			gem.color = Rules.GEM_COLORS[0]
 			gem.visible = false
 			add_child(gem)
 			_gems.append(gem)
@@ -66,64 +67,41 @@ func _ready() -> void:
 			var facet := Polygon2D.new()
 			facet.position = _origin(x, y)
 			facet.polygon = _facet_polygon()
-			facet.color = Color(1, 1, 1, 0.38)
+			facet.color = Color(1, 1, 1, 0.42)
 			facet.visible = false
 			add_child(facet)
 			_facets.append(facet)
 
-
-func show_cells(data: Array) -> void:
-	colors = data.duplicate()
-	highlighted.clear()
-	_redraw()
-
-
-func highlight(list: Array) -> void:
-	highlighted.clear()
-	for item in list:
-		if item is Vector2i:
-			highlighted.append(item)
-	_redraw()
+	_line = Line2D.new()
+	_line.width = 8.0
+	_line.default_color = Color(1, 1, 1, 0.85)
+	_line.joint_mode = Line2D.LINE_JOINT_ROUND
+	_line.begin_cap_mode = Line2D.LINE_CAP_ROUND
+	_line.end_cap_mode = Line2D.LINE_CAP_ROUND
+	_line.z_index = 4
+	add_child(_line)
 
 
-func clear_highlight() -> void:
-	highlighted.clear()
-	_redraw()
+func setup(roller: Callable) -> void:
+	roll_color = roller
 
 
-func clear_selection() -> void:
-	selected = Vector2i(-1, -1)
-	_redraw()
-
-
-func handle_key(keycode: Key) -> bool:
-	if not accept_input:
-		return false
-	var direction := Vector2i.ZERO
-	match keycode:
-		KEY_LEFT, KEY_A:
-			direction = Vector2i(-1, 0)
-		KEY_RIGHT, KEY_D:
-			direction = Vector2i(1, 0)
-		KEY_UP, KEY_W:
-			direction = Vector2i(0, -1)
-		KEY_DOWN, KEY_S:
-			direction = Vector2i(0, 1)
-		KEY_SPACE, KEY_ENTER, KEY_KP_ENTER:
-			_activate(cursor)
-			return true
-		_:
-			return false
-	var next := cursor + direction
-	if next.x < 0 or next.y < 0 or next.x >= SIZE or next.y >= SIZE:
-		return true
-	cursor = next
-	_redraw()
-	return true
+func refill() -> void:
+	_falling = false
+	drawing = false
+	path = []
+	_line.clear_points()
+	for _attempt in 24:
+		for i in colors.size():
+			colors[i] = int(roll_color.call())
+		if _has_chain():
+			break
+	_snap_visuals()
+	path_changed.emit(-1, 0)
 
 
 func _input(event: InputEvent) -> void:
-	if not accept_input:
+	if not accept_input or _falling:
 		return
 	if event is InputEventMouseButton:
 		var button := event as InputEventMouseButton
@@ -131,100 +109,203 @@ func _input(event: InputEvent) -> void:
 			return
 		if button.pressed:
 			if not get_global_rect().has_point(button.position):
-				_press_cell = Vector2i(-1, -1)
 				return
-			var local := button.position - get_global_rect().position
-			var cell := _cell_at(local)
+			var cell := _cell_at(button.position - get_global_rect().position)
 			if cell.x < 0:
-				_press_cell = Vector2i(-1, -1)
 				return
-			_press_cell = cell
-			_press_pos = local
-			_drag_sent = false
-			get_viewport().set_input_as_handled()
-		else:
-			if _press_cell.x < 0:
+			var result: Dictionary = Rules.try_extend([], cell, colors, COLS)
+			if str(result["action"]) != "start":
 				return
-			if not _drag_sent:
-				_activate(_press_cell)
-			_press_cell = Vector2i(-1, -1)
+			path = result["path"]
+			drawing = true
+			_sync_path_visual()
 			get_viewport().set_input_as_handled()
-	elif event is InputEventMouseMotion and _press_cell.x >= 0 and not _drag_sent:
+		elif drawing:
+			_release_path()
+			get_viewport().set_input_as_handled()
+	elif event is InputEventMouseMotion and drawing:
 		var motion := event as InputEventMouseMotion
 		var local := motion.position - get_global_rect().position
-		var delta := local - _press_pos
-		if delta.length() < 20.0:
+		var cell := _cell_at(local)
+		if cell.x < 0:
 			return
-		var direction := Vector2i.ZERO
-		if absf(delta.x) > absf(delta.y):
-			direction = Vector2i(1 if delta.x > 0.0 else -1, 0)
-		else:
-			direction = Vector2i(0, 1 if delta.y > 0.0 else -1)
-		var target := _press_cell + direction
-		_drag_sent = true
-		if target.x >= 0 and target.y >= 0 and target.x < SIZE and target.y < SIZE:
-			_request_swap(_press_cell, target)
+		var result: Dictionary = Rules.try_extend(path, cell, colors, COLS)
+		if str(result["action"]) == "ignore":
+			return
+		path = result["path"]
+		_sync_path_visual()
 		get_viewport().set_input_as_handled()
 
 
-func _activate(cell: Vector2i) -> void:
-	if cell.x < 0:
-		return
-	cursor = cell
-	if selected.x < 0:
-		selected = cell
-	elif selected == cell:
-		selected = Vector2i(-1, -1)
-	elif absi(selected.x - cell.x) + absi(selected.y - cell.y) == 1:
-		var origin := selected
-		selected = Vector2i(-1, -1)
-		_redraw()
-		_request_swap(origin, cell)
-		return
+func _release_path() -> void:
+	drawing = false
+	var length := path.size()
+	var color_index := -1
+	var origin := Vector2.ZERO
+	if length > 0:
+		var last: Vector2i = path[length - 1]
+		color_index = int(colors[_index(last.x, last.y)])
+		origin = _center_global(last)
+	var committed: Array = path.duplicate()
+	path = []
+	_line.clear_points()
+	_paint()
+	path_changed.emit(-1, 0)
+	if length >= Rules.MIN_CHAIN and color_index >= 0:
+		chain_resolved.emit(color_index, length, origin)
+		_collapse(committed)
 	else:
-		selected = cell
-	_redraw()
+		chain_broken.emit()
 
 
-func _request_swap(a: Vector2i, b: Vector2i) -> void:
-	selected = Vector2i(-1, -1)
-	cursor = b
-	_redraw()
-	swap_requested.emit(a, b)
+func _collapse(removed_cells: Array) -> void:
+	_falling = true
+	accept_input = false
+	var removed := {}
+	for cell in removed_cells:
+		removed[_index(cell.x, cell.y)] = true
+	var next_colors: Array[int] = []
+	next_colors.resize(COLS * ROWS)
+	var from_y: Array[float] = []
+	from_y.resize(COLS * ROWS)
+	for x in COLS:
+		var survivors: Array[Dictionary] = []
+		for y in range(ROWS - 1, -1, -1):
+			var index := _index(x, y)
+			if removed.has(index) or colors[index] < 0:
+				continue
+			survivors.append({"color": colors[index], "from": float(y)})
+		var write := ROWS - 1
+		for item in survivors:
+			var index := _index(x, write)
+			next_colors[index] = int(item["color"])
+			from_y[index] = float(item["from"])
+			write -= 1
+		var above := 1
+		while write >= 0:
+			var index := _index(x, write)
+			next_colors[index] = int(roll_color.call())
+			from_y[index] = float(-above)
+			above += 1
+			write -= 1
+	colors = next_colors
+	_paint()
+	var tween := create_tween()
+	tween.set_parallel(true)
+	for y in ROWS:
+		for x in COLS:
+			var index := _index(x, y)
+			var start := _origin(x, from_y[index])
+			var dest := _origin(x, y)
+			_gems[index].position = start
+			_facets[index].position = start
+			tween.tween_property(_gems[index], "position", dest, 0.16)
+			tween.tween_property(_facets[index], "position", dest, 0.16)
+	tween.chain().tween_callback(_finish_fall)
 
 
-func _redraw() -> void:
-	if colors.size() != SIZE * SIZE or _wells.is_empty():
-		return
-	for y in SIZE:
-		for x in SIZE:
-			var i := y * SIZE + x
-			var color_id := int(colors[i])
-			var cell := Vector2i(x, y)
-			var occupied := color_id >= 0
-			_gems[i].visible = occupied
-			_facets[i].visible = occupied
-			if occupied:
-				_gems[i].color = GEM_COLORS[color_id]
-			var well := Color("1a2030")
-			if not occupied:
-				well = Color("121722")
-			elif highlighted.has(cell):
-				well = Color("f4e7c3")
-				_gems[i].color = GEM_COLORS[color_id].lightened(0.42)
-			elif selected == cell:
-				well = Color("e2b340")
-			elif cursor == cell:
-				well = Color("31405c")
-			_wells[i].color = well
+func _finish_fall() -> void:
+	_snap_visuals()
+	if not _has_chain():
+		for _attempt in 24:
+			for i in colors.size():
+				colors[i] = int(roll_color.call())
+			if _has_chain():
+				break
+		_snap_visuals()
+		board_note.emit("没有可连的三连，棋盘已重排")
+	_falling = false
+	accept_input = true
+
+
+func _sync_path_visual() -> void:
+	_line.clear_points()
+	var color_index := -1
+	for cell in path:
+		_line.add_point(_center_local(cell))
+		color_index = int(colors[_index(cell.x, cell.y)])
+	if color_index >= 0:
+		var tint: Color = Rules.GEM_COLORS[color_index]
+		tint.a = 0.9
+		_line.default_color = tint
+		_line.width = 6.0 + float(mini(path.size(), 8)) * 0.7
+	_paint()
+	path_changed.emit(color_index, path.size())
+
+
+func _paint() -> void:
+	var heads := {}
+	if not path.is_empty():
+		var head: Vector2i = path[path.size() - 1]
+		heads[_index(head.x, head.y)] = true
+	var marked := {}
+	for cell in path:
+		marked[_index(cell.x, cell.y)] = true
+	for i in colors.size():
+		var color_id := int(colors[i])
+		var shown := color_id >= 0
+		_gems[i].visible = shown
+		_facets[i].visible = shown
+		if shown:
+			var tint: Color = Rules.GEM_COLORS[color_id]
+			if heads.has(i):
+				tint = tint.lightened(0.35)
+			_gems[i].color = tint
+		if marked.has(i):
+			_wells[i].color = Color("f4e7c3")
+		elif shown:
+			_wells[i].color = Color("1a2030")
+		else:
+			_wells[i].color = Color("121722")
+
+
+func _snap_visuals() -> void:
+	for y in ROWS:
+		for x in COLS:
+			var index := _index(x, y)
+			var home := _origin(x, y)
+			_gems[index].position = home
+			_facets[index].position = home
+	_paint()
+
+
+func _has_chain() -> bool:
+	var seen := {}
+	for y in ROWS:
+		for x in COLS:
+			var index := _index(x, y)
+			if seen.has(index) or colors[index] < 0:
+				continue
+			if _flood(x, y, colors[index], seen) >= Rules.MIN_CHAIN:
+				return true
+	return false
+
+
+func _flood(x: int, y: int, color_id: int, seen: Dictionary) -> int:
+	var stack: Array[Vector2i] = [Vector2i(x, y)]
+	var count := 0
+	while not stack.is_empty():
+		var cell: Vector2i = stack.pop_back()
+		if cell.x < 0 or cell.y < 0 or cell.x >= COLS or cell.y >= ROWS:
+			continue
+		var index := _index(cell.x, cell.y)
+		if seen.has(index) or colors[index] != color_id:
+			continue
+		seen[index] = true
+		count += 1
+		stack.append(cell + Vector2i(1, 0))
+		stack.append(cell + Vector2i(-1, 0))
+		stack.append(cell + Vector2i(0, 1))
+		stack.append(cell + Vector2i(0, -1))
+	return count
 
 
 func _cell_at(local: Vector2) -> Vector2i:
 	if local.x < PAD or local.y < PAD:
 		return Vector2i(-1, -1)
-	var x := int((local.x - PAD) / float(TILE + GAP))
-	var y := int((local.y - PAD) / float(TILE + GAP))
-	if x < 0 or y < 0 or x >= SIZE or y >= SIZE:
+	var x := int((local.x - PAD) / float(STRIDE))
+	var y := int((local.y - PAD) / float(STRIDE))
+	if x < 0 or y < 0 or x >= COLS or y >= ROWS:
 		return Vector2i(-1, -1)
 	var origin := _origin(x, y)
 	if local.x >= origin.x + TILE or local.y >= origin.y + TILE:
@@ -232,12 +313,24 @@ func _cell_at(local: Vector2) -> Vector2i:
 	return Vector2i(x, y)
 
 
-func _origin(x: int, y: int) -> Vector2:
-	return Vector2(PAD + x * (TILE + GAP), PAD + y * (TILE + GAP))
+func _center_local(cell: Vector2i) -> Vector2:
+	return _origin(cell.x, cell.y) + Vector2(TILE * 0.5, TILE * 0.5)
+
+
+func _center_global(cell: Vector2i) -> Vector2:
+	return _gems[_index(cell.x, cell.y)].global_position + Vector2(TILE * 0.5, TILE * 0.5)
+
+
+func _origin(x: int, y: float) -> Vector2:
+	return Vector2(PAD + float(x) * STRIDE, PAD + y * STRIDE)
+
+
+func _index(x: int, y: int) -> int:
+	return y * COLS + x
 
 
 func _pixel_size() -> int:
-	return PAD * 2 + SIZE * TILE + (SIZE - 1) * GAP
+	return PAD * 2 + COLS * TILE + (COLS - 1) * GAP
 
 
 func _gem_polygon() -> PackedVector2Array:
