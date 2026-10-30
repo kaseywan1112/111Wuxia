@@ -178,8 +178,8 @@ func _start_fight() -> void:
 	lane.freeze_bonus = state.freeze_bonus
 	lane.summon_bonus = state.summon_bonus
 	lane.begin_fight(state.current_kind(), state.trash_variant(), state.hp, state.max_hp)
-	action_label.text = "敌人从下方走上来。划过漂浮的宝石来施法。"
-	preview_label.text = "按住划过宝石。一刀里最多的颜色生效，至少 3 颗"
+	action_label.text = "宝石从四周飞过。短划切开它们来施法。"
+	preview_label.text = "快速短划。一刀里最多的颜色生效，至少 3 颗"
 	_refresh_hud()
 	get_viewport().gui_release_focus()
 
@@ -526,7 +526,7 @@ func _build_combat() -> void:
 	lane.position = Vector2(660, 4)
 	world.add_child(lane)
 
-	preview_label = _label("按住划过宝石。一刀里最多的颜色生效，至少 3 颗", 16, PAPER, true)
+	preview_label = _label("快速短划。一刀里最多的颜色生效，至少 3 颗", 16, PAPER, true)
 	preview_label.position = Vector2(28, 516)
 	preview_label.size = Vector2(600, 44)
 	world.add_child(preview_label)
@@ -554,11 +554,11 @@ func _build_start() -> void:
 	var title := _label("消消乐 Rogue", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	var sub := _label("左边划过漂浮的宝石，右边打一条路", 18, MUTED)
+	var sub := _label("左边短划飞过的宝石，右边打一条路", 18, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"按住鼠标，划过左边漂浮的宝石。宝石被划到也不会消失。一刀里数量最多的颜色才会施法；数量相同则算这一刀里更晚划到的颜色。那种颜色至少 3 颗才成功，第 4 颗起每多 1 颗伤害 ×1.15，6 颗及以上施放大招。不够 3 颗就断连。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。划中的同一刻，右边就会闪光、冰冻、出藤或落雷。连击越高，增伤、闪屏和声音越猛；划空或停太久，连击就掉。",
+		"宝石从四周飞进左边。按住鼠标做短短的一划，像切水果，划到的宝石会消失。一刀里数量最多的颜色才会施法；数量相同则算更晚划到的颜色。那种颜色至少 3 颗才成功，第 4 颗起每多 1 颗伤害 ×1.15，6 颗及以上施放大招。不够 3 颗就断连，但划到的宝石一样会消失。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。划中的同一刻，右边就会闪光、冰冻、出藤或落雷。连击越高，增伤、闪屏和声音越猛；划空或停太久，连击就掉。",
 		16,
 		PAPER,
 		true
