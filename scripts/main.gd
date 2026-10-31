@@ -1,9 +1,10 @@
 extends Control
 
 const Rules = preload("res://scripts/run_state.gd")
-const BoardView = preload("res://scripts/board_view.gd")
+const Gear = preload("res://scripts/gear.gd")
+const FieldView = preload("res://scripts/board_view.gd")
 
-enum Mode { START, COMBAT, LEVEL, LOSE }
+enum Mode { START, EQUIP, COMBAT, LEVEL, LOSE }
 
 const INK := Color("0e1116")
 const PAPER := Color("e7e4dc")
@@ -12,25 +13,28 @@ const GOLD := Color("f0d7a2")
 const DANGER := Color("e07a72")
 
 var state: Rules
+var gear: Gear
 var mode := Mode.START
 var ui_lock := false
 var level_pending := 0
+var drops_this_run := 0
 
-var field
+var field: FieldView
 var combat_root: Control
 var start_screen: Control
+var equip_screen: Control
 var level_screen: Control
 var lose_screen: Control
 
-var wave_label: Label
-var pops_label: Label
+var kills_label: Label
 var level_label: Label
 var weapon_label: Label
-var next_label: Label
+var relic_label: Label
 var action_label: Label
 var level_box: HBoxContainer
 var level_title: Label
 var lose_detail: Label
+var equip_body: VBoxContainer
 
 var flash: ColorRect
 var shake := 0.0
@@ -47,19 +51,20 @@ func _ready() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 	theme = _build_theme()
 	state = Rules.new()
+	gear = Gear.new()
+	gear.load_default()
 	_build_background()
 	_build_combat()
 	_build_start()
+	_build_equip()
 	_build_level()
 	_build_lose()
 	_build_flash()
 	_build_audio()
-	field.chained.connect(_on_chained)
-	field.basics.connect(_on_basics)
-	field.glanced.connect(_on_glanced)
-	field.cleared.connect(_on_cleared)
+	field.struck_same.connect(_on_same)
+	field.struck_basic.connect(_on_basic)
+	field.killed.connect(_on_killed)
 	field.crushed.connect(_on_crushed)
-	field.waved.connect(_on_waved)
 	_show_start()
 
 
@@ -82,103 +87,75 @@ func _unhandled_input(event: InputEvent) -> void:
 			if _is_accept(key.keycode):
 				_start_run()
 				get_viewport().set_input_as_handled()
+			elif key.keycode == KEY_E:
+				_show_equip()
+				get_viewport().set_input_as_handled()
+		Mode.EQUIP:
+			if key.keycode == KEY_ESCAPE or key.keycode == KEY_E or _is_accept(key.keycode):
+				_show_start()
+				get_viewport().set_input_as_handled()
 		Mode.LEVEL:
 			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
-				_pick_level(0)
+				_pick_relic(0)
 			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
-				_pick_level(1)
+				_pick_relic(1)
 			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
-				_pick_level(2)
+				_pick_relic(2)
 
 
 func _start_run() -> void:
 	if ui_lock:
 		return
 	ui_lock = true
-	state.start_run(_new_seed())
+	drops_this_run = 0
 	level_pending = 0
+	state.begin_run(gear, _new_seed())
 	mode = Mode.COMBAT
 	_show_only(combat_root)
 	field.begin(state)
-	action_label.text = "子弹打中就消失。移动鼠标，或按左右键瞄准。"
+	var kind := "挥砍" if state.attack_kind == "melee" else "射击"
+	action_label.text = "%s正在自动%s。同色是重击，别的颜色只是基础伤害。" % [state.weapon_name, kind]
 	_refresh_hud()
 	get_viewport().gui_release_focus()
 	ui_lock = false
 
 
-func _on_chained(color_index: int, length: int, positions: Array) -> void:
+func _on_same(color_index: int, victims: int, amount: float) -> void:
 	if mode != Mode.COMBAT:
 		return
-	var big: bool = state.is_super(length)
-	var title := Rules.SCHOOL_NAMES[color_index]
-	if color_index == 4:
-		var cut := state.white_cooldown_cut(length)
-		field.cut_cooldowns(cut)
-		action_label.text = "白宝石 · %d 连 · %s%s" % [
-			length, state.apply_white(length), "  ·  大招" if big else "",
-		]
-		_flash(Rules.GEM_COLORS[4], 0.22 if big else 0.12)
-		_play_tone(620.0, 0.08, 0.28)
-		field.refill_if_empty()
-		_refresh_hud()
-		return
-	var damage := state.chain_damage(length)
-	field.hurt_color(color_index, damage)
-	_apply_school(color_index, big, positions)
-	action_label.text = "%s · %d 连 · 全体 %d%s" % [
-		title, length, int(round(damage)), "  ·  大招" if big else "",
+	action_label.text = "同色 · %s · %d · 连锁 %d" % [
+		Rules.COLOR_NAMES[color_index], int(round(amount)), victims,
 	]
-	_flash(Rules.GEM_COLORS[color_index], 0.28 if big else 0.14)
-	_play_tone(420.0 + float(length) * 28.0, 0.07, 0.3)
-	field.refill_if_empty()
+	_flash(Rules.GEM_COLORS[color_index], 0.18)
+	_play_tone(420.0 + float(victims) * 24.0, 0.06, 0.28)
 	_refresh_hud()
 
 
-func _apply_school(color_index: int, big: bool, positions: Array) -> void:
-	match color_index:
-		0:
-			var radius := 84.0 * (1.0 + state.fire_bonus)
-			var extra := 24.0 * state.spell_power * (1.0 + state.fire_bonus)
-			if big:
-				radius *= 1.35
-				extra *= 1.6
-			field.burst_rings(positions, minf(radius, 130.0))
-			field.hurt_near(positions, radius, extra)
-		1:
-			var hold := 3.6 if big else 2.2 as float
-			field.freeze_for(hold + state.freeze_bonus)
-		2:
-			var hops := 2 if big else 1
-			var info: Dictionary = field.neighbor_pairs(positions, hops)
-			var vine := 20.0 * state.spell_power + state.vine_bonus
-			if big:
-				vine *= 1.7
-			field.vine_marks(info["pairs"])
-			field.hurt_ids(info["ids"], vine)
-		3:
-			var jumps := (3 if big else 1) + int(state.lightning_jumps)
-			var ids: Array = field.nearest_ids(positions, jumps, [])
-			var bolt := 28.0 * state.spell_power
-			if big:
-				bolt *= 1.5
-			field.hurt_ids(ids, bolt)
+func _on_basic(amount: float) -> void:
+	action_label.text = "基础伤害 %d" % int(round(amount))
 
 
-func _on_basics(_color_index: int, amount: float, _at: Vector2) -> void:
-	action_label.text = "打中了 · 基础伤害 %d" % int(round(amount))
-
-
-func _on_glanced() -> void:
-	action_label.text = "同色不够 %d 颗" % state.chain_need
-
-
-func _on_cleared(count: int) -> void:
-	var ups := state.note_pops(count)
+func _on_killed() -> void:
+	var ups := state.note_kills(1)
 	if ups > 0:
 		level_pending += ups
+		field.accept_input = false
 		call_deferred("_open_level_if_needed")
+	_roll_loot()
 	if mode == Mode.COMBAT:
 		_refresh_hud()
+
+
+func _roll_loot() -> void:
+	var force := drops_this_run == 0 and state.kills >= 3
+	var id := gear.try_drop(state.rng, force)
+	if id == "":
+		return
+	gear.add_item(id)
+	drops_this_run += 1
+	gear.save()
+	action_label.text = "掉落了 %s" % gear.item_name(id)
+	_play_tone(640.0, 0.08, 0.24)
 
 
 func _on_crushed() -> void:
@@ -188,19 +165,14 @@ func _on_crushed() -> void:
 	_show_lose()
 
 
-func _on_waved(wave_number: int) -> void:
-	action_label.text = "这一团清掉了 · 第 %d 波" % wave_number
-	_refresh_hud()
-
-
 func _open_level_if_needed() -> void:
-	if level_pending <= 0 or mode != Mode.COMBAT or field.dead:
+	if level_pending <= 0 or mode != Mode.COMBAT or not field.running:
 		return
 	_open_level()
 
 
 func _open_level() -> void:
-	if level_pending <= 0 or mode != Mode.COMBAT or field.dead:
+	if level_pending <= 0 or mode != Mode.COMBAT:
 		return
 	level_pending -= 1
 	mode = Mode.LEVEL
@@ -211,21 +183,19 @@ func _open_level() -> void:
 	get_viewport().gui_release_focus()
 
 
-func _pick_level(index: int) -> void:
+func _pick_relic(index: int) -> void:
 	if ui_lock or mode != Mode.LEVEL:
 		return
 	if index < 0 or index >= state.level_stock.size():
 		return
 	ui_lock = true
 	var id := str(state.level_stock[index])
-	state.apply_level(id)
-	if state.is_weapon(id):
-		field.arm_weapon(id)
+	state.apply_relic(id)
 	level_screen.visible = false
 	mode = Mode.COMBAT
 	_refresh_hud()
 	ui_lock = false
-	if level_pending > 0 and not field.dead:
+	if level_pending > 0:
 		_open_level()
 		return
 	field.accept_input = true
@@ -233,37 +203,52 @@ func _pick_level(index: int) -> void:
 
 func _show_start() -> void:
 	mode = Mode.START
+	_refresh_start()
 	_show_only(start_screen)
+
+
+func _show_equip() -> void:
+	mode = Mode.EQUIP
+	_rebuild_equip()
+	_show_only(equip_screen)
 
 
 func _show_lose() -> void:
 	mode = Mode.LOSE
 	field.stop()
-	lose_detail.text = "气泡压到了你。\n第 %d 波\n消除  %d\n种子  %d" % [
-		state.wave, state.pops, state.seed_value,
+	lose_detail.text = "怪物走到了你身边。\n击杀  %d\n掉落  %d\n种子  %d" % [
+		state.kills, drops_this_run, state.seed_value,
 	]
 	_show_only(lose_screen)
 
 
 func _show_only(which: Control) -> void:
-	for screen in [start_screen, combat_root, lose_screen]:
+	for screen in [start_screen, equip_screen, combat_root, lose_screen]:
+		if screen == null:
+			continue
 		screen.visible = screen == which
 	if level_screen != null:
 		level_screen.visible = false
 
 
 func _refresh_hud() -> void:
-	wave_label.text = "第 %d 波" % state.wave
-	pops_label.text = "消除  %d" % state.pops
+	kills_label.text = "击杀  %d" % state.kills
 	level_label.text = state.level_text()
-	weapon_label.text = state.weapon_line()
-	next_label.text = "下一发  %s" % Rules.COLOR_NAMES[field.next_color()]
+	var kind := "近战" if state.attack_kind == "melee" else "远程"
+	weapon_label.text = "%s  ·  %s  ·  %s" % [
+		state.weapon_name, kind, Rules.COLOR_NAMES[state.attack_color],
+	]
+	relic_label.text = state.relic_line()
+
+
+func _refresh_start() -> void:
+	pass
 
 
 func _flash(color: Color, amount: float) -> void:
 	flash_color = color
 	flash_alpha = amount
-	shake = maxf(shake, 4.0 if amount > 0.2 else 2.0)
+	shake = maxf(shake, 3.0)
 
 
 func _tick_shake(delta: float) -> void:
@@ -271,6 +256,8 @@ func _tick_shake(delta: float) -> void:
 	if shake > 0.0:
 		kick = Vector2(randf_range(-shake, shake), randf_range(-shake, shake))
 		shake = maxf(shake - delta * 28.0, 0.0)
+	if world == null:
+		return
 	world.offset_left = kick.x
 	world.offset_right = kick.x
 	world.offset_top = 96.0 + kick.y
@@ -280,8 +267,10 @@ func _tick_shake(delta: float) -> void:
 func _tick_flash(delta: float) -> void:
 	if flash_alpha > 0.0:
 		flash_alpha = maxf(flash_alpha - delta * 1.4, 0.0)
+	if flash == null:
+		return
 	flash.color = flash_color
-	flash.modulate.a = flash_alpha
+	flash.color.a = flash_alpha
 
 
 func _build_background() -> void:
@@ -297,7 +286,6 @@ func _build_combat() -> void:
 	_cover(combat_root)
 	combat_root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(combat_root)
-
 	var hud := PanelContainer.new()
 	hud.position = Vector2(16, 10)
 	hud.size = Vector2(1248, 78)
@@ -317,19 +305,16 @@ func _build_combat() -> void:
 	var row := HBoxContainer.new()
 	row.add_theme_constant_override("separation", 22)
 	stack.add_child(row)
-	wave_label = _label("第 1 波", 16, GOLD)
-	pops_label = _label("消除  0", 16, PAPER)
+	kills_label = _label("击杀  0", 16, PAPER)
 	level_label = _label("等级  1", 16, PAPER)
-	weapon_label = _label("飞刀", 16, GOLD)
-	next_label = _label("下一发  红", 16, PAPER)
-	row.add_child(wave_label)
-	row.add_child(pops_label)
+	weapon_label = _label("朴刀", 16, GOLD)
+	relic_label = _label("遗物  无", 16, MUTED)
+	row.add_child(kills_label)
 	row.add_child(level_label)
 	row.add_child(weapon_label)
-	row.add_child(next_label)
+	row.add_child(relic_label)
 	action_label = _label("", 16, GOLD, false)
 	stack.add_child(action_label)
-
 	world = Control.new()
 	world.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	world.set_anchors_preset(Control.PRESET_FULL_RECT)
@@ -339,7 +324,7 @@ func _build_combat() -> void:
 	holder.set_anchors_preset(Control.PRESET_FULL_RECT)
 	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	world.add_child(holder)
-	field = BoardView.new()
+	field = FieldView.new()
 	holder.add_child(field)
 
 
@@ -353,11 +338,11 @@ func _build_start() -> void:
 	var title := _label("消消乐 Rogue", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	var sub := _label("顶上是一团彩色怪物，你在底下瞄准", 18, MUTED)
+	var sub := _label("怪物从上方走下来，你在底下自动攻击", 18, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"怪物像泡泡挂在天花板上，会慢慢往下压。你站在底部瞄准，武器按时间自己往上射。子弹打中就消失，不会粘在上面。\n\n飞刀每 2 秒连射红、红、紫。打中不同颜色只造成一点基础伤害。打中同色、而且那一团已经连着 3 颗，才会炸掉那一团，这一色剩下的怪物都吃到连锁伤害，再附加流派效果。6 颗及以上是大招。\n\n消除一段之后升级，3 选 1，只留到这局结束。还能拿到法术书、藤弓、雷符，以及伤害、射速、连锁颗数的强化。可以同时带着好几件武器。气泡压到你身上，这局就结束。",
+		"颜色要对上。打中武器的颜色是重击，屏幕上别的同色怪物也会吃到连锁。别的颜色只造成基础伤害。没有泡泡，子弹和挥砍都不会粘在怪物身上。\n\n局内击杀一段之后升级，从 3 件遗物里选 1 件，只留到这局结束：猛击、疾射、连锁、双发、长刃。\n\n局外是装备。怪物会掉武器、护甲和饰品。同一套装两件一起穿上才有套装效果，装备会留到下一局。",
 		16,
 		PAPER,
 		true
@@ -367,11 +352,65 @@ func _build_start() -> void:
 	var button := _button("开始游戏")
 	button.pressed.connect(_start_run)
 	box.add_child(button)
-	var hint := _label("回车或空格也可以开始", 14, MUTED)
+	var gear_button := _button("整理装备")
+	gear_button.pressed.connect(_show_equip)
+	box.add_child(gear_button)
+	var hint := _label("回车开始，E 打开装备", 14, MUTED)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(hint)
 	start_screen.add_child(panel)
 	add_child(start_screen)
+
+
+func _build_equip() -> void:
+	equip_screen = _full_center()
+	var panel := _card(Color("161b24"))
+	equip_body = VBoxContainer.new()
+	equip_body.add_theme_constant_override("separation", 8)
+	equip_body.custom_minimum_size = Vector2(680, 0)
+	panel.add_child(equip_body)
+	equip_screen.add_child(panel)
+	add_child(equip_screen)
+
+
+func _rebuild_equip() -> void:
+	for child in equip_body.get_children():
+		child.queue_free()
+	var title := _label("装备", 32, GOLD)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	equip_body.add_child(title)
+	var sub := _label("点一件穿上。同一套装凑齐两件就生效，下一局还在。", 15, MUTED)
+	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	equip_body.add_child(sub)
+	for slot in Gear.SLOT_ORDER:
+		var worn := gear.equipped_id(slot)
+		var worn_name := "空" if worn == "" else gear.item_name(worn)
+		equip_body.add_child(_label("%s    %s" % [Gear.SLOT_NAMES[slot], worn_name], 18, GOLD))
+	equip_body.add_child(_label("背包", 16, MUTED))
+	for id in gear.owned:
+		var info: Dictionary = Gear.ITEMS[id]
+		var set_name := "无套装"
+		if str(info["set"]) != "" and Gear.SETS.has(str(info["set"])):
+			set_name = str(Gear.SETS[str(info["set"])]["name"])
+		var button := _button("%s  ·  %s  ·  %s" % [str(info["name"]), Gear.SLOT_NAMES[str(info["slot"])], set_name])
+		button.pressed.connect(_equip_item.bind(id))
+		equip_body.add_child(button)
+	for set_id in Gear.SET_ORDER:
+		var count := gear.set_count(set_id)
+		var bonus := str(Gear.SETS[set_id]["bonus"])
+		var name := str(Gear.SETS[set_id]["name"])
+		var color := GOLD if count >= 2 else MUTED
+		var mark := "已生效" if count >= 2 else "未生效"
+		equip_body.add_child(_label("%s  %d/2  %s  ·  %s" % [name, count, bonus, mark], 15, color))
+	var back := _button("返回")
+	back.pressed.connect(_show_start)
+	equip_body.add_child(back)
+
+
+func _equip_item(id: String) -> void:
+	gear.equip(id)
+	gear.save()
+	_rebuild_equip()
 
 
 func _build_level() -> void:
@@ -381,30 +420,24 @@ func _build_level() -> void:
 	level_screen.z_index = 40
 	level_screen.mouse_filter = Control.MOUSE_FILTER_STOP
 	var dim := ColorRect.new()
-	dim.color = Color(0, 0, 0, 0.34)
-	dim.mouse_filter = Control.MOUSE_FILTER_STOP
-	_cover(dim)
+	dim.color = Color(0, 0, 0, 0.45)
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
 	level_screen.add_child(dim)
 	var center := CenterContainer.new()
-	_cover(center)
-	center.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
 	level_screen.add_child(center)
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 12)
 	center.add_child(box)
-	level_title = _label("升级", 36, GOLD)
+	level_title = _label("选择遗物", 32, GOLD)
 	level_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(level_title)
-	var sub := _label("选一个强化，留到这局结束", 16, MUTED)
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(sub)
-	level_box = HBoxContainer.new()
-	level_box.add_theme_constant_override("separation", 16)
-	level_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_child(level_box)
-	var hint := _label("按 1 / 2 / 3 选择", 14, MUTED)
+	var hint := _label("选一件，留到这局结束。按 1 / 2 / 3", 15, MUTED)
 	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(hint)
+	level_box = HBoxContainer.new()
+	level_box.add_theme_constant_override("separation", 16)
+	box.add_child(level_box)
 	add_child(level_screen)
 
 
@@ -415,9 +448,9 @@ func _rebuild_level() -> void:
 	var tints: Array[Color] = [Color("243044"), Color("24362f"), Color("3a3224")]
 	for i in state.level_stock.size():
 		var id := str(state.level_stock[i])
-		var info: Dictionary = Rules.LEVEL_UPS[id]
+		var info: Dictionary = Rules.RELICS[id]
 		var panel := _card(tints[i % tints.size()])
-		panel.custom_minimum_size = Vector2(250, 230)
+		panel.custom_minimum_size = Vector2(220, 180)
 		var inner := VBoxContainer.new()
 		inner.add_theme_constant_override("separation", 8)
 		panel.add_child(inner)
@@ -425,10 +458,10 @@ func _rebuild_level() -> void:
 		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		inner.add_child(name)
 		var desc := _label(str(info["desc"]), 15, PAPER, true)
-		desc.custom_minimum_size = Vector2(210, 84)
+		desc.custom_minimum_size = Vector2(190, 70)
 		inner.add_child(desc)
 		var button := _button("拿下")
-		button.pressed.connect(_pick_level.bind(i))
+		button.pressed.connect(_pick_relic.bind(i))
 		inner.add_child(button)
 		level_box.add_child(panel)
 
@@ -440,33 +473,37 @@ func _build_lose() -> void:
 	box.add_theme_constant_override("separation", 12)
 	box.custom_minimum_size = Vector2(460, 0)
 	panel.add_child(box)
-	var title := _label("气泡压到了你", 40, DANGER)
+	var title := _label("你倒下了", 40, DANGER)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	lose_detail = _label("", 18, PAPER, true)
+	lose_detail = _label("", 18, PAPER)
 	lose_detail.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	lose_detail.custom_minimum_size = Vector2(420, 0)
 	box.add_child(lose_detail)
-	var button := _button("再来一局")
-	button.pressed.connect(_start_run)
-	box.add_child(button)
+	var again := _button("再来一局")
+	again.pressed.connect(_start_run)
+	box.add_child(again)
+	var gear_button := _button("整理装备")
+	gear_button.pressed.connect(_show_equip)
+	box.add_child(gear_button)
+	var hint := _label("回车再来，E 整理装备", 14, MUTED)
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	box.add_child(hint)
 	lose_screen.add_child(panel)
 	add_child(lose_screen)
 
 
 func _build_flash() -> void:
 	flash = ColorRect.new()
-	_cover(flash)
+	flash.color = Color(1, 1, 1, 0)
 	flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	flash.color = Color.WHITE
-	flash.modulate.a = 0.0
+	flash.set_anchors_preset(Control.PRESET_FULL_RECT)
+	flash.z_index = 30
 	add_child(flash)
 
 
 func _build_audio() -> void:
-	for _i in 6:
+	for _i in 4:
 		var player := AudioStreamPlayer.new()
-		player.volume_db = -6.0
 		add_child(player)
 		sfx.append(player)
 
@@ -475,9 +512,6 @@ func _play_tone(freq: float, duration: float, volume: float) -> void:
 	if not audio_ok or sfx.is_empty():
 		return
 	var stream := _beep(freq, duration, volume)
-	if stream == null:
-		audio_ok = false
-		return
 	var player := sfx[sfx_cursor % sfx.size()]
 	sfx_cursor += 1
 	player.stream = stream
@@ -487,16 +521,13 @@ func _play_tone(freq: float, duration: float, volume: float) -> void:
 func _beep(freq: float, duration: float, volume: float) -> AudioStreamWAV:
 	var rate := 22050
 	var count := int(float(rate) * duration)
-	if count < 1:
-		return null
 	var data := PackedByteArray()
 	data.resize(count * 2)
 	for i in count:
 		var t := float(i) / float(rate)
 		var env := 1.0 - float(i) / float(count)
 		var sample := int(sin(t * freq * TAU) * env * volume * 32000.0)
-		data[i * 2] = sample & 255
-		data[i * 2 + 1] = (sample >> 8) & 255
+		data.encode_s16(i * 2, sample)
 	var stream := AudioStreamWAV.new()
 	stream.format = AudioStreamWAV.FORMAT_16_BITS
 	stream.mix_rate = rate
@@ -549,7 +580,7 @@ func _button(text: String) -> Button:
 	var button := Button.new()
 	button.text = text
 	button.add_theme_font_size_override("font_size", 16)
-	button.custom_minimum_size = Vector2(0, 44)
+	button.custom_minimum_size = Vector2(0, 42)
 	var normal := StyleBoxFlat.new()
 	normal.bg_color = Color("2c384c")
 	normal.set_corner_radius_all(10)

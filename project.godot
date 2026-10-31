@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="消消乐 Rogue"
-config/description="彩色怪物挂在顶上。子弹打中就消失，同色连上才全体受击。"
+config/description="彩色怪物从上方走下来。同色是重击并能连锁，装备和套装会留到下一局。"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"

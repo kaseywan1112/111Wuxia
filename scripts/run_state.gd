@@ -1,22 +1,16 @@
 extends RefCounted
 
-## One-screen bubble run. A connected group of 3+ deals chain damage to every
-## monster of that color. Length 6+ is the super. Level picks last this run only.
+## One run. Relics last until the monsters reach you. Gear is copied in at the start.
 
-const MIN_CHAIN := 3
-const SUPER_AT := 6
-const STEP_MULT := 1.15
-const CHAIN_BASE := 40.0
-const BASIC_DAMAGE := 12.0
-const MONSTER_HP := 96.0
-const KNIFE_INTERVAL := 2.0
-const BOOK_INTERVAL := 5.0
-const BOW_INTERVAL := 3.5
-const TALISMAN_INTERVAL := 4.0
-const FIRST_POPS := 12
+const Gear = preload("res://scripts/gear.gd")
+
+const SAME_BASE := 50.0
+const CHAIN_BASE := 24.0
+const BASIC_BASE := 16.0
+const MONSTER_HP := 84.0
+const FIRST_KILLS := 8
 
 const COLOR_NAMES: Array[String] = ["红", "蓝", "绿", "紫", "白"]
-const SCHOOL_NAMES: Array[String] = ["火焰爆发", "冰冻", "藤蔓", "闪电", "白宝石"]
 const GEM_COLORS: Array[Color] = [
 	Color("e85d4c"),
 	Color("3d9ee0"),
@@ -25,308 +19,149 @@ const GEM_COLORS: Array[Color] = [
 	Color("f4f1ea"),
 ]
 
-const KNIFE_SEQUENCE: Array[int] = [0, 0, 3]
-const BOOK_SEQUENCE: Array[int] = [1, 1, 1, 4, 4, 3, 3]
-const BOW_SEQUENCE: Array[int] = [2, 2, 2, 4]
-const TALISMAN_SEQUENCE: Array[int] = [3, 3, 0, 4]
-const WEAPON_ORDER: Array[String] = ["knife", "book", "bow", "talisman"]
-const WEAPON_OFFER: Array[String] = ["book", "bow", "talisman"]
-
-const LEVEL_UPS := {
-	"book": {"name": "法术书", "desc": "拿上法术书。每 5 秒连射蓝、蓝、蓝、白、白、紫、紫。"},
-	"bow": {"name": "藤弓", "desc": "拿上藤弓。每 3.5 秒连射绿、绿、绿、白。"},
-	"talisman": {"name": "雷符", "desc": "拿上雷符。每 4 秒连射紫、紫、红、白。"},
-	"haste": {"name": "快刀", "desc": "飞刀的发射间隔缩短 0.3 秒。"},
-	"rapid": {"name": "疾射", "desc": "每件武器的发射间隔缩短 15%。"},
-	"power": {"name": "连锁增幅", "desc": "同色连锁伤害 +15%。"},
-	"heavy": {"name": "重击", "desc": "基础伤害 +10，连锁伤害再 +10%。"},
-	"wide": {"name": "宽链", "desc": "连锁所需的同色数量少 1 颗，最少 2 颗。"},
-	"fire": {"name": "爆裂", "desc": "火焰爆发的范围和伤害提高。"},
-	"freeze": {"name": "凝霜", "desc": "冰冻让整团气泡停得更久。"},
-	"vine": {"name": "蔓延", "desc": "藤蔓会伤到旁边的怪物。"},
-	"bolt": {"name": "引雷", "desc": "闪电多跳一个目标。"},
-	"white": {"name": "白玉", "desc": "白宝石还会立刻缩短武器冷却。"},
+const RELICS := {
+	"power": {"name": "猛击", "desc": "伤害 +15%。基础、同色和连锁都算。"},
+	"haste": {"name": "疾射", "desc": "攻击间隔缩短 15%。"},
+	"chain": {"name": "连锁", "desc": "同色连锁伤害 +25%。"},
+	"extra": {"name": "双发", "desc": "远程多一发弹。近战挥击更宽。"},
+	"reach": {"name": "长刃", "desc": "近战范围 +40%。"},
 }
 
-var seed_value: int = 1
+const RELIC_ORDER: Array[String] = ["power", "haste", "chain", "extra", "reach"]
+
 var rng := RandomNumberGenerator.new()
-var spell_power: float = 1.0
-var knife_interval: float = KNIFE_INTERVAL
-var rate_scale: float = 1.0
-var basic_bonus: float = 0.0
-var chain_need: int = MIN_CHAIN
-var owned: Array[String] = ["knife"]
-var fire_bonus: float = 0.0
-var freeze_bonus: float = 0.0
-var vine_bonus: float = 0.0
-var lightning_jumps: int = 0
-var white_haste: bool = false
+var seed_value: int = 1
+var kills: int = 0
+var kills_toward: int = 0
+var kills_needed: int = FIRST_KILLS
 var level: int = 1
-var pops: int = 0
-var pops_toward: int = 0
-var pops_needed: int = FIRST_POPS
-var wave: int = 1
 var level_stock: Array[String] = []
+var relic_power: int = 0
+var relic_haste: int = 0
+var relic_chain: int = 0
+var relic_extra: int = 0
+var relic_reach: int = 0
+
+var attack_kind: String = "melee"
+var attack_color: int = 0
+var weapon_name: String = "朴刀"
+var base_interval: float = 0.42
+var base_reach: float = 250.0
+var gear_damage: float = 1.0
+var gear_rate: float = 1.0
+var gear_extra: int = 0
+var same_scale: float = 1.0
 
 
-func start_run(new_seed: int) -> void:
+func begin_run(gear: Gear, new_seed: int) -> void:
 	seed_value = new_seed if new_seed != 0 else 1
 	rng.seed = seed_value
-	spell_power = 1.0
-	knife_interval = KNIFE_INTERVAL
-	rate_scale = 1.0
-	basic_bonus = 0.0
-	chain_need = MIN_CHAIN
-	owned = ["knife"]
-	fire_bonus = 0.0
-	freeze_bonus = 0.0
-	vine_bonus = 0.0
-	lightning_jumps = 0
-	white_haste = false
+	kills = 0
+	kills_toward = 0
+	kills_needed = FIRST_KILLS
 	level = 1
-	pops = 0
-	pops_toward = 0
-	pops_needed = FIRST_POPS
-	wave = 1
 	level_stock = []
+	relic_power = 0
+	relic_haste = 0
+	relic_chain = 0
+	relic_extra = 0
+	relic_reach = 0
+	attack_kind = gear.attack_kind()
+	attack_color = gear.attack_color()
+	weapon_name = gear.item_name(gear.weapon_id)
+	base_interval = gear.attack_interval()
+	base_reach = gear.attack_reach()
+	gear_damage = gear.damage_factor()
+	gear_rate = gear.rate_factor()
+	gear_extra = gear.extra_projectiles()
+	same_scale = gear.same_factor()
 
 
 func level_text() -> String:
-	return "等级 %d  ·  %d/%d" % [level, pops_toward, pops_needed]
+	return "等级 %d  ·  %d/%d" % [level, kills_toward, kills_needed]
 
 
-func chain_damage(length: int) -> float:
-	if length < chain_need:
-		return 0.0
-	return CHAIN_BASE * spell_power * pow(STEP_MULT, float(length - chain_need))
+func damage_mult() -> float:
+	return (1.0 + 0.15 * float(relic_power)) * gear_damage
 
 
-func basic_amount() -> float:
-	return BASIC_DAMAGE + basic_bonus
+func same_damage() -> float:
+	return SAME_BASE * damage_mult() * same_scale
 
 
-func is_weapon(id: String) -> bool:
-	return WEAPON_ORDER.has(id)
+func chain_damage() -> float:
+	return CHAIN_BASE * damage_mult() * same_scale * (1.0 + 0.25 * float(relic_chain))
 
 
-func owns(id: String) -> bool:
-	return owned.has(id)
+func basic_damage() -> float:
+	return BASIC_BASE * damage_mult()
 
 
-func owned_ids() -> Array[String]:
-	var ids: Array[String] = []
-	for id in WEAPON_ORDER:
-		if owns(id):
-			ids.append(id)
-	return ids
+func attack_interval() -> float:
+	return maxf(base_interval * gear_rate * pow(0.85, float(relic_haste)), 0.26)
 
 
-func weapon_interval(id: String) -> float:
-	var base := KNIFE_INTERVAL
-	match id:
-		"knife":
-			base = knife_interval
-		"book":
-			base = BOOK_INTERVAL
-		"bow":
-			base = BOW_INTERVAL
-		"talisman":
-			base = TALISMAN_INTERVAL
-	return maxf(base * rate_scale, 0.55)
+func projectile_count() -> int:
+	if attack_kind != "ranged":
+		return 1
+	return 1 + gear_extra + relic_extra
 
 
-func weapon_sequence(id: String) -> Array:
-	match id:
-		"book":
-			return BOOK_SEQUENCE
-		"bow":
-			return BOW_SEQUENCE
-		"talisman":
-			return TALISMAN_SEQUENCE
-		_:
-			return KNIFE_SEQUENCE
+func melee_reach() -> float:
+	return base_reach * (1.0 + 0.40 * float(relic_reach))
 
 
-func weapon_line() -> String:
-	var names: PackedStringArray = []
-	for id in owned_ids():
-		names.append(str(LEVEL_UPS[id]["name"]) if id != "knife" else "飞刀")
-	return "  ·  ".join(names)
+func melee_arc() -> float:
+	return 1.05 + 0.32 * float(relic_extra)
 
 
-func is_super(length: int) -> bool:
-	return length >= SUPER_AT
-
-
-## Each call adds popped bubbles. Returns how many level-ups that earned.
-func note_pops(count: int) -> int:
+func note_kills(count: int) -> int:
 	if count <= 0:
 		return 0
-	pops += count
-	pops_toward += count
+	kills += count
+	kills_toward += count
 	var gained := 0
-	while pops_toward >= pops_needed:
-		pops_toward -= pops_needed
+	while kills_toward >= kills_needed:
+		kills_toward -= kills_needed
 		level += 1
-		pops_needed += 4
+		kills_needed += 4
 		gained += 1
 	return gained
 
 
 func roll_level() -> void:
-	var upgrades: Array[String] = []
-	for key in LEVEL_UPS.keys():
-		var id := str(key)
-		if is_weapon(id):
-			continue
-		upgrades.append(id)
-	var pending := _unowned_weapons()
-	if pending.is_empty():
-		level_stock = _pick_from(upgrades, 3)
-		return
-	var forced := pending[0]
-	var pool: Array[String] = upgrades.duplicate()
-	for id in pending:
-		if id != forced:
-			pool.append(id)
-	level_stock = [forced]
-	for id in _pick_from(pool, 2):
-		level_stock.append(id)
+	level_stock = _pick_from(RELIC_ORDER, 3)
 
 
-func _unowned_weapons() -> Array[String]:
-	var pending: Array[String] = []
-	for id in WEAPON_OFFER:
-		if not owns(id):
-			pending.append(id)
-	return pending
-
-
-func apply_level(id: String) -> void:
-	if is_weapon(id):
-		if not owns(id):
-			owned.append(id)
-		return
+func apply_relic(id: String) -> void:
 	match id:
-		"haste":
-			knife_interval = maxf(knife_interval - 0.3, 0.8)
-		"rapid":
-			rate_scale *= 0.85
 		"power":
-			spell_power += 0.15
-		"heavy":
-			basic_bonus += 10.0
-			spell_power += 0.10
-		"wide":
-			chain_need = maxi(chain_need - 1, 2)
-		"fire":
-			fire_bonus += 0.55
-		"freeze":
-			freeze_bonus += 0.8
-		"vine":
-			vine_bonus += 16.0
-		"bolt":
-			lightning_jumps += 1
-		"white":
-			white_haste = true
+			relic_power += 1
+		"haste":
+			relic_haste += 1
+		"chain":
+			relic_chain += 1
+		"extra":
+			relic_extra += 1
+		"reach":
+			relic_reach += 1
 
 
-func apply_white(length: int) -> String:
-	var cut := 0.8
-	if is_super(length):
-		cut = 2.2
-	if white_haste:
-		cut += 0.6
-	return "冷却 -%.1f 秒" % cut
-
-
-func white_cooldown_cut(length: int) -> float:
-	var cut := 2.2 if is_super(length) else 0.8 as float
-	if white_haste:
-		cut += 0.6
-	return cut
-
-
-static func row_width(row: int, cols: int) -> int:
-	return cols if row % 2 == 0 else cols - 1
-
-
-static func neighbors(col: int, row: int) -> Array:
-	var deltas: Array
-	if row % 2 == 0:
-		deltas = [[-1, 0], [1, 0], [-1, -1], [0, -1], [-1, 1], [0, 1]]
-	else:
-		deltas = [[-1, 0], [1, 0], [0, -1], [1, -1], [0, 1], [1, 1]]
-	var out: Array = []
-	for pair in deltas:
-		out.append(Vector2i(col + int(pair[0]), row + int(pair[1])))
-	return out
-
-
-static func same_color_component(cells: Array, start: int) -> Array:
-	if start < 0 or start >= cells.size():
-		return []
-	var origin: Dictionary = cells[start]
-	var color := int(origin["color"])
-	var index_at := {}
-	for i in cells.size():
-		var cell: Dictionary = cells[i]
-		index_at[_key(int(cell["col"]), int(cell["row"]))] = i
-	var seen := {}
-	var stack: Array = [start]
-	var found: Array[int] = []
-	seen[start] = true
-	while not stack.is_empty():
-		var current := int(stack.pop_back())
-		found.append(current)
-		var cell: Dictionary = cells[current]
-		for npos in neighbors(int(cell["col"]), int(cell["row"])):
-			var spot: Vector2i = npos
-			var key := _key(spot.x, spot.y)
-			if not index_at.has(key):
-				continue
-			var next := int(index_at[key])
-			if seen.has(next):
-				continue
-			if int(cells[next]["color"]) != color:
-				continue
-			seen[next] = true
-			stack.append(next)
-	return found
-
-
-static func floating_indices(cells: Array) -> Array:
-	var index_at := {}
-	var stack: Array = []
-	var seen := {}
-	for i in cells.size():
-		var cell: Dictionary = cells[i]
-		index_at[_key(int(cell["col"]), int(cell["row"]))] = i
-		if int(cell["row"]) == 0:
-			stack.append(i)
-			seen[i] = true
-	while not stack.is_empty():
-		var current := int(stack.pop_back())
-		var cell: Dictionary = cells[current]
-		for npos in neighbors(int(cell["col"]), int(cell["row"])):
-			var spot: Vector2i = npos
-			var key := _key(spot.x, spot.y)
-			if not index_at.has(key):
-				continue
-			var next := int(index_at[key])
-			if seen.has(next):
-				continue
-			seen[next] = true
-			stack.append(next)
-	var floating: Array[int] = []
-	for i in cells.size():
-		if not seen.has(i):
-			floating.append(i)
-	return floating
-
-
-static func _key(col: int, row: int) -> String:
-	return "%d:%d" % [col, row]
+func relic_line() -> String:
+	var parts: PackedStringArray = []
+	if relic_power > 0:
+		parts.append("猛击%d" % relic_power)
+	if relic_haste > 0:
+		parts.append("疾射%d" % relic_haste)
+	if relic_chain > 0:
+		parts.append("连锁%d" % relic_chain)
+	if relic_extra > 0:
+		parts.append("双发%d" % relic_extra)
+	if relic_reach > 0:
+		parts.append("长刃%d" % relic_reach)
+	if parts.is_empty():
+		return "遗物  无"
+	return "遗物  " + " ".join(parts)
 
 
 func _pick_from(pool: Array[String], count: int) -> Array[String]:

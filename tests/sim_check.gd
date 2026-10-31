@@ -1,6 +1,7 @@
 extends SceneTree
 
 const Rules = preload("res://scripts/run_state.gd")
+const Gear = preload("res://scripts/gear.gd")
 
 var errors: Array[String] = []
 
@@ -10,10 +11,10 @@ func _init() -> void:
 
 
 func _run() -> void:
-	_test_damage()
-	_test_weapons()
-	_test_cluster()
-	_test_levels()
+	_test_hits()
+	_test_relics()
+	_test_sets()
+	_test_save()
 	if errors.is_empty():
 		print("SIM_OK")
 		quit(0)
@@ -22,119 +23,109 @@ func _run() -> void:
 	quit(1)
 
 
-func _test_damage() -> void:
-	var state = Rules.new()
-	state.start_run(3)
-	var three := float(state.chain_damage(3))
-	var four := float(state.chain_damage(4))
-	var six := float(state.chain_damage(6))
-	_check(three == Rules.CHAIN_BASE, "a 3-chain is the base hit")
-	_check(_near(four / three, Rules.STEP_MULT), "each extra bubble multiplies by 1.15")
-	_check(_near(six / three, pow(Rules.STEP_MULT, 3.0)), "three extra steps compound")
-	_check(float(state.chain_damage(2)) == 0.0, "fewer than 3 is not a chain")
-	_check(Rules.BASIC_DAMAGE < three * 0.5, "a different color only deals small basic damage")
-	_check(state.is_super(6) and not state.is_super(5), "6+ is the super")
-	_check(six < Rules.MONSTER_HP, "one chain hit does not erase a fresh monster")
-	_check(Rules.BASIC_DAMAGE * 3 < Rules.MONSTER_HP, "a few basic hits do not pop a monster")
+func _test_hits() -> void:
+	var gear := Gear.new()
+	gear.reset_new()
+	var state := Rules.new()
+	state.begin_run(gear, 3)
+	var same := state.same_damage()
+	var chain := state.chain_damage()
+	var basic := state.basic_damage()
+	_check(same == Rules.SAME_BASE, "a same-color hit is the big hit")
+	_check(chain == Rules.CHAIN_BASE, "other monsters of that color take the chain hit")
+	_check(basic == Rules.BASIC_BASE, "a different color is only basic damage")
+	_check(basic < same * 0.5, "basic damage stays well under the same-color hit")
+	_check(same < Rules.MONSTER_HP and same * 2.0 > Rules.MONSTER_HP, "two same-color hits fell a fresh monster")
+	_check(chain < Rules.MONSTER_HP, "one chain hit does not erase a fresh monster")
+	_check(state.attack_kind == "melee" and state.attack_color == 0, "a new fighter starts with the red knife")
+	_check(state.projectile_count() == 1, "the knife does not throw extra shots")
 
 
-func _test_weapons() -> void:
-	_check(Rules.KNIFE_INTERVAL == 2.0, "the knife fires every 2 seconds")
-	_check(Rules.BOOK_INTERVAL == 5.0, "the spellbook fires every 5 seconds")
-	_check(Rules.BOW_INTERVAL == 3.5, "the vine bow fires every 3.5 seconds")
-	_check(Rules.TALISMAN_INTERVAL == 4.0, "the talisman fires every 4 seconds")
-	_check(Rules.KNIFE_SEQUENCE == [0, 0, 3], "knife sequence is red red purple")
-	_check(Rules.BOOK_SEQUENCE == [1, 1, 1, 4, 4, 3, 3], "book sequence is three blue, two white, two purple")
-	_check(Rules.BOW_SEQUENCE == [2, 2, 2, 4], "bow sequence is green green green white")
-	_check(Rules.TALISMAN_SEQUENCE == [3, 3, 0, 4], "talisman sequence is purple purple red white")
-	var state = Rules.new()
-	state.start_run(1)
-	_check(state.owned_ids() == ["knife"], "a run starts with the knife only")
-	state.apply_level("book")
-	state.apply_level("bow")
-	_check(state.owns("book") and state.owns("bow") and state.owns("knife"), "a run can hold more than one weapon")
-	_check(_near(state.weapon_interval("bow"), 3.5), "the bow keeps its own interval")
-	state.apply_level("rapid")
-	_check(_near(state.weapon_interval("knife"), 2.0 * 0.85), "rapid fire shortens every weapon")
-	_check(not state.owns("talisman"), "the talisman is still a level-up pickup")
-	state.apply_level("talisman")
-	_check(state.owns("talisman") and state.owned_ids().size() == 4, "all four weapons can be held together")
-	_check(_near(state.weapon_interval("talisman"), 4.0 * 0.85), "the talisman uses the shared fire rate once owned")
-
-
-func _test_cluster() -> void:
-	var reds: Array = [
-		{"col": 5, "row": 0, "color": 0},
-		{"col": 6, "row": 0, "color": 0},
-		{"col": 5, "row": 1, "color": 0},
-	]
-	var group: Array = Rules.same_color_component(reds, 0)
-	_check(group.size() == 3, "three touching bubbles of one color connect, including diagonally on the hex")
-	var bent: Array = [
-		{"col": 4, "row": 2, "color": 2},
-		{"col": 5, "row": 2, "color": 2},
-		{"col": 5, "row": 3, "color": 2},
-	]
-	_check(Rules.same_color_component(bent, 0).size() == 3, "the link can turn")
-	var gap: Array = [
-		{"col": 1, "row": 0, "color": 0},
-		{"col": 2, "row": 0, "color": 1},
-		{"col": 3, "row": 0, "color": 0},
-	]
-	_check(Rules.same_color_component(gap, 0).size() == 1, "a different color does not bridge a chain")
-	var apart: Array = [
-		{"col": 0, "row": 0, "color": 3},
-		{"col": 2, "row": 0, "color": 3},
-	]
-	_check(Rules.same_color_component(apart, 0).size() == 1, "a gap does not connect")
-	var ceiling: Array = [
-		{"col": 0, "row": 0, "color": 1},
-		{"col": 0, "row": 1, "color": 2},
-		{"col": 4, "row": 3, "color": 0},
-	]
-	var floating: Array = Rules.floating_indices(ceiling)
-	_check(floating.size() == 1 and int(floating[0]) == 2, "a bubble that lost the ceiling falls")
-	var hung: Array = [
-		{"col": 1, "row": 0, "color": 0},
-		{"col": 1, "row": 1, "color": 3},
-	]
-	_check(Rules.floating_indices(hung).is_empty(), "anything still touching the ceiling stays")
-
-
-func _test_levels() -> void:
-	var state = Rules.new()
-	state.start_run(9)
-	_check(state.note_pops(11) == 0, "eleven pops are not yet a level")
-	_check(state.note_pops(1) == 1, "the twelfth pop levels up")
-	_check(state.level == 2 and state.pops_needed == 16 and state.pops_toward == 0, "the next stretch asks for four more pops")
+func _test_relics() -> void:
+	var gear := Gear.new()
+	gear.reset_new()
+	var state := Rules.new()
+	state.begin_run(gear, 4)
+	_check(state.note_kills(7) == 0, "seven kills are not yet a level")
+	_check(state.note_kills(1) == 1, "the eighth kill levels up")
+	_check(state.kills_needed == 12 and state.kills_toward == 0, "the next stretch asks for four more kills")
 	state.roll_level()
-	_check(state.level_stock.size() == 3, "three choices")
-	_check(str(state.level_stock[0]) == "book", "an unowned weapon is offered until taken")
+	_check(state.level_stock.size() == 3, "three relic choices")
 	var seen := {}
 	for id in state.level_stock:
-		_check(Rules.LEVEL_UPS.has(str(id)), "choice exists")
-		_check(not seen.has(str(id)), "choices are distinct")
+		_check(Rules.RELICS.has(str(id)), "relic exists")
+		_check(not seen.has(str(id)), "relics are distinct")
 		seen[str(id)] = true
-	state.apply_level("power")
-	_check(_near(state.spell_power, 1.15), "power lasts the run")
-	state.apply_level("heavy")
-	_check(_near(state.basic_amount(), Rules.BASIC_DAMAGE + 10.0), "heavy raises basic damage")
-	_check(_near(state.spell_power, 1.25), "heavy also raises chain damage")
-	state.apply_level("wide")
-	_check(state.chain_need == 2, "wide lowers the chain size")
-	_check(_near(float(state.chain_damage(2)), state.spell_power * Rules.CHAIN_BASE), "a 2-chain counts after wide")
-	_check(float(state.chain_damage(1)) == 0.0, "one bubble is still not a chain")
-	state.apply_level("book")
-	state.roll_level()
-	_check(str(state.level_stock[0]) == "bow", "the next unowned weapon is offered next")
-	_check(not state.level_stock.has("book"), "the book is not offered twice")
-	state.apply_level("bow")
-	state.apply_level("talisman")
-	state.roll_level()
-	for id in state.level_stock:
-		_check(not state.is_weapon(str(id)), "owned weapons leave the offer")
-	state.start_run(9)
-	_check(state.level == 1 and state.owned_ids() == ["knife"] and state.spell_power == 1.0 and state.chain_need == 3 and state.pops == 0, "a new run clears the picks")
+	var before := state.same_damage()
+	state.apply_relic("power")
+	_check(_near(state.same_damage() / before, 1.15), "猛击 raises damage for the run")
+	_check(_near(state.basic_damage(), Rules.BASIC_BASE * 1.15), "猛击 also raises basic damage")
+	var gap := state.attack_interval()
+	state.apply_relic("haste")
+	_check(_near(state.attack_interval() / gap, 0.85), "疾射 shortens the attack interval")
+	var chain_before := state.chain_damage()
+	state.apply_relic("chain")
+	_check(_near(state.chain_damage() / chain_before, 1.25), "连锁 raises chain damage")
+	state.apply_relic("extra")
+	_check(state.melee_arc() > 1.05, "双发 widens a melee swing")
+	var reach := state.melee_reach()
+	state.apply_relic("reach")
+	_check(_near(state.melee_reach() / reach, 1.4), "长刃 extends melee reach")
+	state.begin_run(gear, 4)
+	_check(state.relic_power == 0 and state.kills == 0 and state.level == 1, "a new run clears relics")
+
+
+func _test_sets() -> void:
+	var gear := Gear.new()
+	gear.reset_new()
+	_check(not gear.set_active("flame"), "one piece is not a set")
+	gear.add_item("flame_bow")
+	gear.add_item("flame_armor")
+	gear.equip("flame_bow")
+	_check(gear.set_count("flame") == 1 and not gear.set_active("flame"), "the bow alone does not light the set")
+	gear.equip("flame_armor")
+	_check(gear.set_active("flame"), "two 赤焰 pieces grant the bonus")
+	_check(_near(gear.same_factor(), 1.30), "赤焰 raises same-color damage")
+	_check(_near(gear.damage_factor(), 1.10), "赤焰甲 adds its own damage")
+	var state := Rules.new()
+	state.begin_run(gear, 1)
+	_check(state.attack_kind == "ranged" and state.attack_color == 0, "the flame bow fires red shots")
+	_check(state.projectile_count() == 1, "the flame set does not add a side shot")
+	_check(_near(state.same_damage(), Rules.SAME_BASE * 1.10 * 1.30), "equipped 赤焰 stacks the armor and the set")
+	gear.add_item("frost_sword")
+	gear.add_item("frost_charm")
+	gear.equip("frost_sword")
+	gear.equip("frost_charm")
+	_check(gear.set_active("frost") and not gear.set_active("flame"), "equipping another weapon drops the old set")
+	_check(_near(gear.rate_factor(), 0.90 * 0.80), "寒铁 charm and set both speed attacks")
+	_check(gear.attack_kind() == "melee" and gear.attack_color() == 1, "the frost sword is a blue melee weapon")
+	gear.add_item("vine_bow")
+	gear.add_item("vine_armor")
+	gear.equip("vine_bow")
+	gear.equip("vine_armor")
+	_check(gear.set_active("vine") and gear.extra_projectiles() == 1, "two 青藤 pieces add a side shot")
+	_check(gear.attack_color() == 2 and gear.attack_kind() == "ranged", "the vine bow fires green shots")
+
+
+func _test_save() -> void:
+	var path := "user://xiaochu_gear_test.cfg"
+	var gear := Gear.new()
+	gear.reset_new()
+	gear.add_item("vine_bow")
+	gear.add_item("vine_armor")
+	gear.equip("vine_bow")
+	gear.equip("vine_armor")
+	gear.save_to(path)
+	var loaded := Gear.new()
+	loaded.reset_new()
+	_check(loaded.load_from(path), "gear file loads")
+	_check(loaded.weapon_id == "vine_bow" and loaded.armor_id == "vine_armor", "equipped pieces come back")
+	_check(loaded.set_active("vine") and loaded.owns("plain"), "the set and the starter both persist")
+	var state := Rules.new()
+	state.begin_run(loaded, 8)
+	state.apply_relic("power")
+	_check(loaded.set_active("vine") and loaded.weapon_id == "vine_bow", "a finished run does not strip the gear")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 
 
 func _near(a: float, b: float) -> bool:
