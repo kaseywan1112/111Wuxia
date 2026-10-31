@@ -11,6 +11,8 @@ const BASIC_DAMAGE := 12.0
 const MONSTER_HP := 96.0
 const KNIFE_INTERVAL := 2.0
 const BOOK_INTERVAL := 5.0
+const BOW_INTERVAL := 3.5
+const TALISMAN_INTERVAL := 4.0
 const FIRST_POPS := 12
 
 const COLOR_NAMES: Array[String] = ["红", "蓝", "绿", "紫", "白"]
@@ -25,11 +27,20 @@ const GEM_COLORS: Array[Color] = [
 
 const KNIFE_SEQUENCE: Array[int] = [0, 0, 3]
 const BOOK_SEQUENCE: Array[int] = [1, 1, 1, 4, 4, 3, 3]
+const BOW_SEQUENCE: Array[int] = [2, 2, 2, 4]
+const TALISMAN_SEQUENCE: Array[int] = [3, 3, 0, 4]
+const WEAPON_ORDER: Array[String] = ["knife", "book", "bow", "talisman"]
+const WEAPON_OFFER: Array[String] = ["book", "bow", "talisman"]
 
 const LEVEL_UPS := {
 	"book": {"name": "法术书", "desc": "拿上法术书。每 5 秒连射蓝、蓝、蓝、白、白、紫、紫。"},
+	"bow": {"name": "藤弓", "desc": "拿上藤弓。每 3.5 秒连射绿、绿、绿、白。"},
+	"talisman": {"name": "雷符", "desc": "拿上雷符。每 4 秒连射紫、紫、红、白。"},
 	"haste": {"name": "快刀", "desc": "飞刀的发射间隔缩短 0.3 秒。"},
+	"rapid": {"name": "疾射", "desc": "每件武器的发射间隔缩短 15%。"},
 	"power": {"name": "连锁增幅", "desc": "同色连锁伤害 +15%。"},
+	"heavy": {"name": "重击", "desc": "基础伤害 +10，连锁伤害再 +10%。"},
+	"wide": {"name": "宽链", "desc": "连锁所需的同色数量少 1 颗，最少 2 颗。"},
 	"fire": {"name": "爆裂", "desc": "火焰爆发的范围和伤害提高。"},
 	"freeze": {"name": "凝霜", "desc": "冰冻让整团气泡停得更久。"},
 	"vine": {"name": "蔓延", "desc": "藤蔓会伤到旁边的怪物。"},
@@ -41,8 +52,10 @@ var seed_value: int = 1
 var rng := RandomNumberGenerator.new()
 var spell_power: float = 1.0
 var knife_interval: float = KNIFE_INTERVAL
-var book_interval: float = BOOK_INTERVAL
-var has_book: bool = false
+var rate_scale: float = 1.0
+var basic_bonus: float = 0.0
+var chain_need: int = MIN_CHAIN
+var owned: Array[String] = ["knife"]
 var fire_bonus: float = 0.0
 var freeze_bonus: float = 0.0
 var vine_bonus: float = 0.0
@@ -61,8 +74,10 @@ func start_run(new_seed: int) -> void:
 	rng.seed = seed_value
 	spell_power = 1.0
 	knife_interval = KNIFE_INTERVAL
-	book_interval = BOOK_INTERVAL
-	has_book = false
+	rate_scale = 1.0
+	basic_bonus = 0.0
+	chain_need = MIN_CHAIN
+	owned = ["knife"]
 	fire_bonus = 0.0
 	freeze_bonus = 0.0
 	vine_bonus = 0.0
@@ -81,9 +96,62 @@ func level_text() -> String:
 
 
 func chain_damage(length: int) -> float:
-	if length < MIN_CHAIN:
+	if length < chain_need:
 		return 0.0
-	return CHAIN_BASE * spell_power * pow(STEP_MULT, float(length - MIN_CHAIN))
+	return CHAIN_BASE * spell_power * pow(STEP_MULT, float(length - chain_need))
+
+
+func basic_amount() -> float:
+	return BASIC_DAMAGE + basic_bonus
+
+
+func is_weapon(id: String) -> bool:
+	return WEAPON_ORDER.has(id)
+
+
+func owns(id: String) -> bool:
+	return owned.has(id)
+
+
+func owned_ids() -> Array[String]:
+	var ids: Array[String] = []
+	for id in WEAPON_ORDER:
+		if owns(id):
+			ids.append(id)
+	return ids
+
+
+func weapon_interval(id: String) -> float:
+	var base := KNIFE_INTERVAL
+	match id:
+		"knife":
+			base = knife_interval
+		"book":
+			base = BOOK_INTERVAL
+		"bow":
+			base = BOW_INTERVAL
+		"talisman":
+			base = TALISMAN_INTERVAL
+	return maxf(base * rate_scale, 0.55)
+
+
+func weapon_sequence(id: String) -> Array:
+	match id:
+		"book":
+			return BOOK_SEQUENCE
+		"bow":
+			return BOW_SEQUENCE
+		"talisman":
+			return TALISMAN_SEQUENCE
+		_:
+			return KNIFE_SEQUENCE
+
+
+func weapon_line() -> String:
+	var names: PackedStringArray = []
+	for id in owned_ids():
+		names.append(str(LEVEL_UPS[id]["name"]) if id != "knife" else "飞刀")
+	return "  ·  ".join(names)
 
 
 func is_super(length: int) -> bool:
@@ -106,30 +174,51 @@ func note_pops(count: int) -> int:
 
 
 func roll_level() -> void:
-	var pool: Array[String] = []
+	var upgrades: Array[String] = []
 	for key in LEVEL_UPS.keys():
 		var id := str(key)
-		if id == "book" and has_book:
+		if is_weapon(id):
 			continue
-		pool.append(id)
-	if not has_book and pool.has("book"):
-		pool.erase("book")
-		level_stock = ["book"]
-		var rest := _pick_from(pool, 2)
-		for id in rest:
-			level_stock.append(id)
+		upgrades.append(id)
+	var pending := _unowned_weapons()
+	if pending.is_empty():
+		level_stock = _pick_from(upgrades, 3)
 		return
-	level_stock = _pick_from(pool, 3)
+	var forced := pending[0]
+	var pool: Array[String] = upgrades.duplicate()
+	for id in pending:
+		if id != forced:
+			pool.append(id)
+	level_stock = [forced]
+	for id in _pick_from(pool, 2):
+		level_stock.append(id)
+
+
+func _unowned_weapons() -> Array[String]:
+	var pending: Array[String] = []
+	for id in WEAPON_OFFER:
+		if not owns(id):
+			pending.append(id)
+	return pending
 
 
 func apply_level(id: String) -> void:
+	if is_weapon(id):
+		if not owns(id):
+			owned.append(id)
+		return
 	match id:
-		"book":
-			has_book = true
 		"haste":
 			knife_interval = maxf(knife_interval - 0.3, 0.8)
+		"rapid":
+			rate_scale *= 0.85
 		"power":
 			spell_power += 0.15
+		"heavy":
+			basic_bonus += 10.0
+			spell_power += 0.10
+		"wide":
+			chain_need = maxi(chain_need - 1, 2)
 		"fire":
 			fire_bonus += 0.55
 		"freeze":

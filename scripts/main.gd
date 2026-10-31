@@ -56,6 +56,7 @@ func _ready() -> void:
 	_build_audio()
 	field.chained.connect(_on_chained)
 	field.basics.connect(_on_basics)
+	field.glanced.connect(_on_glanced)
 	field.cleared.connect(_on_cleared)
 	field.crushed.connect(_on_crushed)
 	field.waved.connect(_on_waved)
@@ -99,7 +100,7 @@ func _start_run() -> void:
 	mode = Mode.COMBAT
 	_show_only(combat_root)
 	field.begin(state)
-	action_label.text = "飞刀会自己发射。移动鼠标，或按左右键瞄准。"
+	action_label.text = "子弹打中就消失。移动鼠标，或按左右键瞄准。"
 	_refresh_hud()
 	get_viewport().gui_release_focus()
 	ui_lock = false
@@ -164,7 +165,11 @@ func _apply_school(color_index: int, big: bool, positions: Array) -> void:
 
 
 func _on_basics(_color_index: int, amount: float, _at: Vector2) -> void:
-	action_label.text = "贴住了 · 基础伤害 %d" % int(round(amount))
+	action_label.text = "打中了 · 基础伤害 %d" % int(round(amount))
+
+
+func _on_glanced() -> void:
+	action_label.text = "同色不够 %d 颗" % state.chain_need
 
 
 func _on_cleared(count: int) -> void:
@@ -214,8 +219,8 @@ func _pick_level(index: int) -> void:
 	ui_lock = true
 	var id := str(state.level_stock[index])
 	state.apply_level(id)
-	if id == "book":
-		field.arm_book()
+	if state.is_weapon(id):
+		field.arm_weapon(id)
 	level_screen.visible = false
 	mode = Mode.COMBAT
 	_refresh_hud()
@@ -251,10 +256,7 @@ func _refresh_hud() -> void:
 	wave_label.text = "第 %d 波" % state.wave
 	pops_label.text = "消除  %d" % state.pops
 	level_label.text = state.level_text()
-	var weapons := "飞刀"
-	if state.has_book:
-		weapons += "  ·  法术书"
-	weapon_label.text = weapons
+	weapon_label.text = state.weapon_line()
 	next_label.text = "下一发  %s" % Rules.COLOR_NAMES[field.next_color()]
 
 
@@ -355,7 +357,7 @@ func _build_start() -> void:
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"怪物像泡泡挂在天花板上，会慢慢往下压。你站在底部，移动鼠标或按左右键瞄准，武器会按时间自己往上射。\n\n飞刀每 2 秒连射三发：红、红、紫。打中不同颜色只会造成一点基础伤害，子弹会粘在上面。同色连上 3 颗就会炸掉那一团，并且这一色的每只怪物都吃到连锁伤害，再附加流派效果：红是火焰爆发，蓝是冰冻，绿是藤蔓，紫是闪电，白是奖励。6 颗及以上是大招。\n\n消除一段之后会升级，从 3 项强化里选 1 个，只留到这局结束。法术书也在这些选择里：每 5 秒连射蓝、蓝、蓝、白、白、紫、紫。气泡压到你身上，这局就结束。",
+		"怪物像泡泡挂在天花板上，会慢慢往下压。你站在底部瞄准，武器按时间自己往上射。子弹打中就消失，不会粘在上面。\n\n飞刀每 2 秒连射红、红、紫。打中不同颜色只造成一点基础伤害。打中同色、而且那一团已经连着 3 颗，才会炸掉那一团，这一色剩下的怪物都吃到连锁伤害，再附加流派效果。6 颗及以上是大招。\n\n消除一段之后升级，3 选 1，只留到这局结束。还能拿到法术书、藤弓、雷符，以及伤害、射速、连锁颗数的强化。可以同时带着好几件武器。气泡压到你身上，这局就结束。",
 		16,
 		PAPER,
 		true

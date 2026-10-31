@@ -15,6 +15,7 @@ const DEATH_Y := 572.0
 
 signal chained(color_index: int, length: int, positions: Array)
 signal basics(color_index: int, amount: float, at: Vector2)
+signal glanced
 signal cleared(count: int)
 signal crushed
 signal waved(wave_number: int)
@@ -28,8 +29,7 @@ var _cells: Array = []
 var _shots: Array = []
 var _burst: Array[int] = []
 var _burst_wait := 0.0
-var _knife_time := 0.6
-var _book_time := 1.4
+var _cool: Dictionary = {}
 var _creep := 0.0
 var _row_timer := 11.0
 var _freeze := 0.0
@@ -93,8 +93,7 @@ func begin(run_state) -> void:
 	dead = false
 	accept_input = true
 	_clear_board()
-	_knife_time = 0.45
-	_book_time = 1.2
+	_cool = {"knife": 0.45}
 	_burst.clear()
 	_burst_wait = 0.0
 	_creep = 0.0
@@ -112,31 +111,33 @@ func stop() -> void:
 
 func next_color() -> int:
 	if not _burst.is_empty():
-		return _burst[0]
-	if state != null and state.has_book and _book_time < _knife_time:
-		return Rules.BOOK_SEQUENCE[0]
-	return Rules.KNIFE_SEQUENCE[0]
-
-
-func knife_ratio() -> float:
+		return int(_burst[0])
 	if state == null:
-		return 0.0
-	return clampf(1.0 - _knife_time / maxf(state.knife_interval, 0.1), 0.0, 1.0)
+		return 0
+	var soonest := ""
+	var soon := 9999.0
+	for id in state.owned_ids():
+		var left := 9999.0
+		if _cool.has(id):
+			left = float(_cool[id])
+		if left < soon:
+			soon = left
+			soonest = id
+	if soonest == "":
+		return 0
+	var seq: Array = state.weapon_sequence(soonest)
+	if seq.is_empty():
+		return 0
+	return int(seq[0])
 
 
-func book_ratio() -> float:
-	if state == null or not state.has_book:
-		return 0.0
-	return clampf(1.0 - _book_time / maxf(state.book_interval, 0.1), 0.0, 1.0)
-
-
-func arm_book() -> void:
-	_book_time = 0.35
+func arm_weapon(id: String) -> void:
+	_cool[id] = 0.35
 
 
 func cut_cooldowns(amount: float) -> void:
-	_knife_time = maxf(_knife_time - amount, 0.05)
-	_book_time = maxf(_book_time - amount, 0.05)
+	for id in _cool.keys():
+		_cool[id] = maxf(float(_cool[id]) - amount, 0.05)
 
 
 func hurt_color(color_index: int, amount: float) -> int:
@@ -399,37 +400,36 @@ func _aim_dir() -> Vector2:
 func _tick_weapons(delta: float) -> void:
 	if state == null:
 		return
-	_knife_time -= delta
-	if _knife_time <= 0.0:
-		_knife_time = state.knife_interval
-		for color_index in Rules.KNIFE_SEQUENCE:
-			_burst.append(int(color_index))
-	if state.has_book:
-		_book_time -= delta
-		if _book_time <= 0.0:
-			_book_time = state.book_interval
-			for color_index in Rules.BOOK_SEQUENCE:
+	for id in state.owned_ids():
+		if not _cool.has(id):
+			_cool[id] = 0.35
+		_cool[id] = float(_cool[id]) - delta
+		if float(_cool[id]) <= 0.0:
+			_cool[id] = state.weapon_interval(id)
+			for color_index in state.weapon_sequence(id):
 				_burst.append(int(color_index))
 	if _burst.is_empty():
 		return
 	_burst_wait -= delta
 	if _burst_wait > 0.0:
 		return
-	_fire(_burst[0])
+	_fire(int(_burst[0]))
 	_burst.remove_at(0)
 	_burst_wait = BURST_GAP
 
 
 func _fire(color_index: int) -> void:
-	var node := _make_bubble(color_index, R * 0.72, false)
-	var pos := _player_pos() + _aim_dir() * 40.0
+	var dir := _aim_dir()
+	var node := _make_shot(color_index)
+	var pos := _player_pos() + dir * 40.0
 	node.position = pos
+	node.rotation = dir.angle() + PI / 2.0
 	node.z_index = 4
 	add_child(node)
 	_shots.append({
 		"color": color_index,
 		"pos": pos,
-		"dir": _aim_dir(),
+		"dir": dir,
 		"node": node,
 		"life": 0.0,
 	})
@@ -453,17 +453,18 @@ func _tick_shots(delta: float) -> void:
 		var node: Node2D = shot["node"]
 		if is_instance_valid(node):
 			node.position = pos
+			node.rotation = dir.angle() + PI / 2.0
 		if float(shot["life"]) > 3.5:
 			if is_instance_valid(node):
 				node.queue_free()
 			continue
-		if _try_stick(shot):
+		if _try_hit(shot):
 			continue
 		kept.append(shot)
 	_shots = kept
 
 
-func _try_stick(shot: Dictionary) -> bool:
+func _try_hit(shot: Dictionary) -> bool:
 	var pos: Vector2 = shot["pos"]
 	var hit: Dictionary = {}
 	var best := R * 1.86
@@ -475,71 +476,57 @@ func _try_stick(shot: Dictionary) -> bool:
 	var ceiling := pos.y <= R + _creep + 2.0
 	if hit.is_empty() and not ceiling:
 		return false
-	var slot := _empty_slot(pos, hit)
-	if slot.x < 0:
-		return false
-	_place_cell(int(shot["color"]), slot.x, slot.y, Rules.MONSTER_HP)
-	var node: Node = shot["node"]
-	if is_instance_valid(node):
-		node.queue_free()
-	_resolve_stick(int(shot["color"]), slot, hit)
+	_discard_shot(shot)
+	if hit.is_empty():
+		return true
+	var color_index := int(shot["color"])
+	if int(hit["color"]) == color_index:
+		_resolve_same(color_index, hit)
+	else:
+		_resolve_basic(color_index, hit)
 	return true
 
 
-func _resolve_stick(color_index: int, slot: Vector2i, hit: Dictionary) -> void:
-	var start := _index_at(slot.x, slot.y)
+func _discard_shot(shot: Dictionary) -> void:
+	var node: Node = shot["node"]
+	if is_instance_valid(node):
+		node.queue_free()
+
+
+func _resolve_same(color_index: int, hit: Dictionary) -> void:
+	var start := _index_at(int(hit["col"]), int(hit["row"]))
 	if start < 0:
 		return
+	var need := Rules.MIN_CHAIN
+	if state != null:
+		need = state.chain_need
 	var group: Array = Rules.same_color_component(_logic_cells(), start)
-	if group.size() >= Rules.MIN_CHAIN:
-		var positions: Array = []
-		var doomed: Array = []
-		for index in group:
-			var cell: Dictionary = _cells[int(index)]
-			positions.append(_visual(cell))
-			doomed.append(cell)
-		_remove_cells(doomed, true)
-		chained.emit(color_index, group.size(), positions)
-		refill_if_empty()
+	if group.size() < need:
+		_popup(_visual(hit), "不够", Color("f4f1ea"))
+		glanced.emit()
 		return
-	if not hit.is_empty() and int(hit["color"]) != color_index:
-		var amount := Rules.BASIC_DAMAGE
-		hit["hp"] = float(hit["hp"]) - amount
-		_popup(_visual(hit), str(int(amount)), Color("f4f1ea"))
-		_refresh_bar(hit)
-		basics.emit(color_index, amount, _visual(hit))
-		if float(hit["hp"]) <= 0.0:
-			_remove_cells([hit], true)
-			refill_if_empty()
+	var positions: Array = []
+	var doomed: Array = []
+	for index in group:
+		var cell: Dictionary = _cells[int(index)]
+		positions.append(_visual(cell))
+		doomed.append(cell)
+	_remove_cells(doomed, true)
+	chained.emit(color_index, group.size(), positions)
+	refill_if_empty()
 
 
-func _empty_slot(pos: Vector2, hit: Dictionary) -> Vector2i:
-	var candidates: Array = []
-	if hit.is_empty():
-		var col := clampi(int(round((pos.x - R) / COL_STEP)), 0, Rules.row_width(0, COLS) - 1)
-		for offset in [0, -1, 1, -2, 2]:
-			var near: int = col + int(offset)
-			if near >= 0 and near < Rules.row_width(0, COLS):
-				candidates.append(Vector2i(near, 0))
-			if near >= 0 and near < Rules.row_width(1, COLS):
-				candidates.append(Vector2i(near, 1))
-	else:
-		for npos in Rules.neighbors(int(hit["col"]), int(hit["row"])):
-			var spot: Vector2i = npos
-			if spot.y < 0 or spot.x < 0 or spot.x >= Rules.row_width(spot.y, COLS):
-				continue
-			candidates.append(spot)
-	var best := Vector2i(-1, -1)
-	var best_d := 99999.0
-	for spot in candidates:
-		var cell: Vector2i = spot
-		if _index_at(cell.x, cell.y) >= 0:
-			continue
-		var dist := pos.distance_to(_nominal(cell.x, cell.y))
-		if dist < best_d:
-			best_d = dist
-			best = cell
-	return best
+func _resolve_basic(color_index: int, hit: Dictionary) -> void:
+	var amount := Rules.BASIC_DAMAGE
+	if state != null:
+		amount = state.basic_amount()
+	hit["hp"] = float(hit["hp"]) - amount
+	_popup(_visual(hit), str(int(round(amount))), Color("f4f1ea"))
+	_refresh_bar(hit)
+	basics.emit(color_index, amount, _visual(hit))
+	if float(hit["hp"]) <= 0.0:
+		_remove_cells([hit], true)
+		refill_if_empty()
 
 
 func _logic_cells() -> Array:
@@ -669,6 +656,17 @@ func _place_cell(color_index: int, col: int, row: int, hp: float) -> void:
 	_cells.append(cell)
 	_refresh_bar(cell)
 	node.position = _visual(cell)
+
+
+func _make_shot(color_index: int) -> Node2D:
+	var node := Node2D.new()
+	var body := Polygon2D.new()
+	body.polygon = PackedVector2Array([
+		Vector2(0, -16), Vector2(5, 8), Vector2(0, 4), Vector2(-5, 8),
+	])
+	body.color = Rules.GEM_COLORS[color_index]
+	node.add_child(body)
+	return node
 
 
 func _make_bubble(color_index: int, radius: float, faced: bool) -> Node2D:

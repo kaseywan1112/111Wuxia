@@ -41,13 +41,25 @@ func _test_damage() -> void:
 func _test_weapons() -> void:
 	_check(Rules.KNIFE_INTERVAL == 2.0, "the knife fires every 2 seconds")
 	_check(Rules.BOOK_INTERVAL == 5.0, "the spellbook fires every 5 seconds")
+	_check(Rules.BOW_INTERVAL == 3.5, "the vine bow fires every 3.5 seconds")
+	_check(Rules.TALISMAN_INTERVAL == 4.0, "the talisman fires every 4 seconds")
 	_check(Rules.KNIFE_SEQUENCE == [0, 0, 3], "knife sequence is red red purple")
 	_check(Rules.BOOK_SEQUENCE == [1, 1, 1, 4, 4, 3, 3], "book sequence is three blue, two white, two purple")
+	_check(Rules.BOW_SEQUENCE == [2, 2, 2, 4], "bow sequence is green green green white")
+	_check(Rules.TALISMAN_SEQUENCE == [3, 3, 0, 4], "talisman sequence is purple purple red white")
 	var state = Rules.new()
 	state.start_run(1)
-	_check(not state.has_book, "a run starts with the knife only")
+	_check(state.owned_ids() == ["knife"], "a run starts with the knife only")
 	state.apply_level("book")
-	_check(state.has_book, "the spellbook is a level-up choice")
+	state.apply_level("bow")
+	_check(state.owns("book") and state.owns("bow") and state.owns("knife"), "a run can hold more than one weapon")
+	_check(_near(state.weapon_interval("bow"), 3.5), "the bow keeps its own interval")
+	state.apply_level("rapid")
+	_check(_near(state.weapon_interval("knife"), 2.0 * 0.85), "rapid fire shortens every weapon")
+	_check(not state.owns("talisman"), "the talisman is still a level-up pickup")
+	state.apply_level("talisman")
+	_check(state.owns("talisman") and state.owned_ids().size() == 4, "all four weapons can be held together")
+	_check(_near(state.weapon_interval("talisman"), 4.0 * 0.85), "the talisman uses the shared fire rate once owned")
 
 
 func _test_cluster() -> void:
@@ -97,7 +109,7 @@ func _test_levels() -> void:
 	_check(state.level == 2 and state.pops_needed == 16 and state.pops_toward == 0, "the next stretch asks for four more pops")
 	state.roll_level()
 	_check(state.level_stock.size() == 3, "three choices")
-	_check(str(state.level_stock[0]) == "book", "the spellbook is offered until taken")
+	_check(str(state.level_stock[0]) == "book", "an unowned weapon is offered until taken")
 	var seen := {}
 	for id in state.level_stock:
 		_check(Rules.LEVEL_UPS.has(str(id)), "choice exists")
@@ -105,11 +117,24 @@ func _test_levels() -> void:
 		seen[str(id)] = true
 	state.apply_level("power")
 	_check(_near(state.spell_power, 1.15), "power lasts the run")
+	state.apply_level("heavy")
+	_check(_near(state.basic_amount(), Rules.BASIC_DAMAGE + 10.0), "heavy raises basic damage")
+	_check(_near(state.spell_power, 1.25), "heavy also raises chain damage")
+	state.apply_level("wide")
+	_check(state.chain_need == 2, "wide lowers the chain size")
+	_check(_near(float(state.chain_damage(2)), state.spell_power * Rules.CHAIN_BASE), "a 2-chain counts after wide")
+	_check(float(state.chain_damage(1)) == 0.0, "one bubble is still not a chain")
 	state.apply_level("book")
 	state.roll_level()
+	_check(str(state.level_stock[0]) == "bow", "the next unowned weapon is offered next")
 	_check(not state.level_stock.has("book"), "the book is not offered twice")
+	state.apply_level("bow")
+	state.apply_level("talisman")
+	state.roll_level()
+	for id in state.level_stock:
+		_check(not state.is_weapon(str(id)), "owned weapons leave the offer")
 	state.start_run(9)
-	_check(state.level == 1 and not state.has_book and state.spell_power == 1.0 and state.pops == 0, "a new run clears the picks")
+	_check(state.level == 1 and state.owned_ids() == ["knife"] and state.spell_power == 1.0 and state.chain_need == 3 and state.pops == 0, "a new run clears the picks")
 
 
 func _near(a: float, b: float) -> bool:
