@@ -1,18 +1,20 @@
 extends RefCounted
 
-## Run rules for the real-time lane roguelike.
-## A same-color touching stroke of length n deals base * 1.15^(n-3). Length 6+ is a super.
-## White is a bonus, not a damage school. Level picks last for the current run only.
+## One-screen bubble run. A connected group of 3+ deals chain damage to every
+## monster of that color. Length 6+ is the super. Level picks last this run only.
 
-const COLS := 8
 const MIN_CHAIN := 3
 const SUPER_AT := 6
 const STEP_MULT := 1.15
-const BASE_DAMAGE := 46.0
-const COMBO_WINDOW := 5.0
+const CHAIN_BASE := 40.0
+const BASIC_DAMAGE := 12.0
+const MONSTER_HP := 96.0
+const KNIFE_INTERVAL := 2.0
+const BOOK_INTERVAL := 5.0
+const FIRST_POPS := 12
 
-const SCHOOLS: Array[String] = ["fire", "ice", "vine", "lightning", "white"]
-const SCHOOL_NAMES: Array[String] = ["火焰", "寒冰", "藤蔓", "雷电", "白宝石"]
+const COLOR_NAMES: Array[String] = ["红", "蓝", "绿", "紫", "白"]
+const SCHOOL_NAMES: Array[String] = ["火焰爆发", "冰冻", "藤蔓", "闪电", "白宝石"]
 const GEM_COLORS: Array[Color] = [
 	Color("e85d4c"),
 	Color("3d9ee0"),
@@ -21,438 +23,230 @@ const GEM_COLORS: Array[Color] = [
 	Color("f4f1ea"),
 ]
 
-const ROUTES: Array[Dictionary] = [
-	{
-		"id": "calm",
-		"name": "平缓小径",
-		"blurb": "两场普通战斗后才遇到精英，商店来得比较早。",
-		"nodes": ["trash", "trash", "shop", "elite", "reward", "boss"],
-	},
-	{
-		"id": "steep",
-		"name": "险峻山路",
-		"blurb": "精英来得更早，中途有一次免费奖赏。",
-		"nodes": ["trash", "elite", "reward", "shop", "trash", "boss"],
-	},
-	{
-		"id": "short",
-		"name": "捷径",
-		"blurb": "路更短，硬仗之间才有商店和奖赏。",
-		"nodes": ["trash", "reward", "elite", "shop", "boss"],
-	},
-]
-
-const FOES := {
-	"grunt": {"hp": 700, "speed": 32.0, "touch": 8, "gold": 12, "name": "灰盗"},
-	"runner": {"hp": 560, "speed": 48.0, "touch": 7, "gold": 12, "name": "疾影"},
-	"elite": {"hp": 1500, "speed": 26.0, "touch": 12, "gold": 36, "name": "精英卫"},
-	"boss": {"hp": 3200, "speed": 22.0, "touch": 15, "gold": 50, "name": "守关巨像"},
-}
-
-const SHOP := {
-	"heal": {"name": "伤药", "desc": "恢复 28 点生命。", "price": 16},
-	"power": {"name": "法术晶石", "desc": "所有法术伤害 +15%。", "price": 22},
-	"freeze": {"name": "寒霜瓶", "desc": "冰冻时间额外 +0.45 秒。", "price": 20},
-	"summon": {"name": "藤种", "desc": "藤灵多停留 1.4 秒。", "price": 20},
-	"vital": {"name": "护符", "desc": "最大生命 +20，并恢复 20。", "price": 18},
-	"tempo": {"name": "连击手套", "desc": "连击增伤提高，连击时间 +0.8 秒。", "price": 18},
-}
-
-const REWARDS := {
-	"power": {"name": "法术精通", "desc": "所有法术伤害 +20%。"},
-	"vital": {"name": "壮骨", "desc": "最大生命 +30，并恢复 30。"},
-	"white": {"name": "白宝石矿", "desc": "场上更容易出现白宝石。"},
-	"tempo": {"name": "从容", "desc": "连击中断前的空窗 +1.6 秒。"},
-	"purse": {"name": "钱袋", "desc": "立刻获得 30 金。"},
-}
+const KNIFE_SEQUENCE: Array[int] = [0, 0, 3]
+const BOOK_SEQUENCE: Array[int] = [1, 1, 1, 4, 4, 3, 3]
 
 const LEVEL_UPS := {
-	"power": {"name": "法术增幅", "desc": "本局法术伤害 +12%。"},
-	"vital": {"name": "生机", "desc": "最大生命 +16，并恢复 16。"},
-	"freeze": {"name": "深寒", "desc": "冰冻时间额外 +0.35 秒。"},
-	"summon": {"name": "藤灵续命", "desc": "藤灵多停留 1.2 秒。"},
-	"tempo": {"name": "连击余韵", "desc": "连击增伤提高，空窗 +0.7 秒。"},
-	"white": {"name": "白宝石缘", "desc": "更容易掉落白宝石。"},
-	"purse": {"name": "拾金", "desc": "立刻获得 20 金。"},
-	"heal": {"name": "回气", "desc": "恢复 24 点生命。"},
+	"book": {"name": "法术书", "desc": "拿上法术书。每 5 秒连射蓝、蓝、蓝、白、白、紫、紫。"},
+	"haste": {"name": "快刀", "desc": "飞刀的发射间隔缩短 0.3 秒。"},
+	"power": {"name": "连锁增幅", "desc": "同色连锁伤害 +15%。"},
+	"fire": {"name": "爆裂", "desc": "火焰爆发的范围和伤害提高。"},
+	"freeze": {"name": "凝霜", "desc": "冰冻让整团气泡停得更久。"},
+	"vine": {"name": "蔓延", "desc": "藤蔓会伤到旁边的怪物。"},
+	"bolt": {"name": "引雷", "desc": "闪电多跳一个目标。"},
+	"white": {"name": "白玉", "desc": "白宝石还会立刻缩短武器冷却。"},
 }
 
 var seed_value: int = 1
 var rng := RandomNumberGenerator.new()
-var route_index: int = -1
-var node_index: int = 0
-var gold: int = 0
-var hp: int = 110
-var max_hp: int = 110
 var spell_power: float = 1.0
+var knife_interval: float = KNIFE_INTERVAL
+var book_interval: float = BOOK_INTERVAL
+var has_book: bool = false
+var fire_bonus: float = 0.0
 var freeze_bonus: float = 0.0
-var summon_bonus: float = 0.0
-var combo_window_bonus: float = 0.0
-var combo_step_bonus: float = 0.0
-var white_weight: float = 0.1
-var empower_next: bool = false
-var combo: int = 0
-var combo_time: float = 0.0
+var vine_bonus: float = 0.0
+var lightning_jumps: int = 0
+var white_haste: bool = false
 var level: int = 1
-var kills_toward: int = 0
-var kills_needed: int = 3
-var shop_stock: Array[String] = []
-var reward_stock: Array[String] = []
+var pops: int = 0
+var pops_toward: int = 0
+var pops_needed: int = FIRST_POPS
+var wave: int = 1
 var level_stock: Array[String] = []
 
 
 func start_run(new_seed: int) -> void:
 	seed_value = new_seed if new_seed != 0 else 1
 	rng.seed = seed_value
-	route_index = -1
-	node_index = 0
-	gold = 0
-	max_hp = 110
-	hp = max_hp
 	spell_power = 1.0
+	knife_interval = KNIFE_INTERVAL
+	book_interval = BOOK_INTERVAL
+	has_book = false
+	fire_bonus = 0.0
 	freeze_bonus = 0.0
-	summon_bonus = 0.0
-	combo_window_bonus = 0.0
-	combo_step_bonus = 0.0
-	white_weight = 0.1
-	empower_next = false
-	combo = 0
-	combo_time = 0.0
+	vine_bonus = 0.0
+	lightning_jumps = 0
+	white_haste = false
 	level = 1
-	kills_toward = 0
-	kills_needed = 3
-	shop_stock = []
-	reward_stock = []
+	pops = 0
+	pops_toward = 0
+	pops_needed = FIRST_POPS
+	wave = 1
 	level_stock = []
 
 
-func choose_route(index: int) -> void:
-	route_index = clampi(index, 0, ROUTES.size() - 1)
-	node_index = 0
+func level_text() -> String:
+	return "等级 %d  ·  %d/%d" % [level, pops_toward, pops_needed]
 
 
-func current_kind() -> String:
-	var nodes: Array = ROUTES[route_index]["nodes"]
-	if node_index < 0 or node_index >= nodes.size():
-		return ""
-	return str(nodes[node_index])
-
-
-func advance() -> void:
-	node_index += 1
-
-
-func route_done() -> bool:
-	if route_index < 0:
-		return false
-	var nodes: Array = ROUTES[route_index]["nodes"]
-	return node_index >= nodes.size()
-
-
-func route_name() -> String:
-	if route_index < 0:
-		return ""
-	return str(ROUTES[route_index]["name"])
-
-
-func progress_text() -> String:
-	var nodes: Array = ROUTES[route_index]["nodes"]
-	return "%s  ·  第 %d / %d 关  ·  %s" % [
-		route_name(),
-		node_index + 1,
-		nodes.size(),
-		node_title(current_kind()),
-	]
-
-
-func trash_variant() -> int:
-	var nodes: Array = ROUTES[route_index]["nodes"]
-	var seen := 0
-	for i in node_index:
-		if str(nodes[i]) == "trash":
-			seen += 1
-	return seen % 2
-
-
-static func node_title(kind: String) -> String:
-	match kind:
-		"trash":
-			return "普通战斗"
-		"elite":
-			return "精英战斗"
-		"shop":
-			return "商店"
-		"reward":
-			return "奖赏"
-		"boss":
-			return "首领"
-		_:
-			return kind
-
-
-static func route_steps_text(index: int) -> String:
-	var parts := PackedStringArray()
-	for kind in ROUTES[index]["nodes"]:
-		parts.append(node_title(str(kind)))
-	return " → ".join(parts)
-
-
-func roll_color() -> int:
-	if rng.randf() < clampf(white_weight, 0.02, 0.45):
-		return 4
-	return rng.randi_range(0, 3)
-
-
-func school_of(color_index: int) -> String:
-	if color_index < 0 or color_index >= SCHOOLS.size():
-		return "fire"
-	return SCHOOLS[color_index]
-
-
-func school_name(color_index: int) -> String:
-	if color_index < 0 or color_index >= SCHOOL_NAMES.size():
-		return ""
-	return SCHOOL_NAMES[color_index]
-
-
-func spell_kind(school: String, length: int) -> String:
-	if school == "white":
-		if length >= SUPER_AT:
-			return "loot"
-		if length >= 4:
-			return "empower"
-		return "extra"
-	if school == "ice":
-		if length >= SUPER_AT:
-			return "wall"
-		if length >= 4:
-			return "freeze"
-		return "spike"
-	if school == "vine":
-		if length >= SUPER_AT:
-			return "summon"
-		if length >= 4:
-			return "entangle"
-		return "lash"
-	if school == "lightning":
-		if length >= SUPER_AT:
-			return "stun"
-		if length >= 4:
-			return "chain"
-		return "bolt"
-	if length >= SUPER_AT:
-		return "explosion"
-	if length >= 4:
-		return "burn"
-	return "fireball"
-
-
-func spell_title(school: String, length: int) -> String:
-	match spell_kind(school, length):
-		"fireball":
-			return "火球"
-		"burn":
-			return "燃烧火球"
-		"explosion":
-			return "爆裂火球"
-		"spike":
-			return "冰刺"
-		"freeze":
-			return "冰封"
-		"wall":
-			return "冰墙"
-		"lash":
-			return "藤鞭"
-		"entangle":
-			return "缠绕"
-		"summon":
-			return "召唤藤灵"
-		"bolt":
-			return "雷击"
-		"chain":
-			return "连锁雷"
-		"stun":
-			return "眩晕雷暴"
-		"extra":
-			return "额外连锁"
-		"empower":
-			return "强化下一发"
-		"loot":
-			return "战利品"
-		_:
-			return "法术"
-
-
-func length_multiplier(length: int) -> float:
-	return pow(STEP_MULT, float(maxi(length, MIN_CHAIN) - MIN_CHAIN))
-
-
-func combo_multiplier(level: int) -> float:
-	if level <= 1:
-		return 1.0
-	return 1.0 + (0.10 + combo_step_bonus) * float(level - 1)
-
-
-func chain_damage(length: int, combo_level: int, empowered: bool) -> float:
+func chain_damage(length: int) -> float:
 	if length < MIN_CHAIN:
 		return 0.0
-	var amount := BASE_DAMAGE * spell_power * length_multiplier(length)
-	amount *= combo_multiplier(combo_level)
-	if empowered:
-		amount *= 1.65
-	return amount
+	return CHAIN_BASE * spell_power * pow(STEP_MULT, float(length - MIN_CHAIN))
 
 
-func combo_window() -> float:
-	return COMBO_WINDOW + combo_window_bonus
+func is_super(length: int) -> bool:
+	return length >= SUPER_AT
 
 
-func note_chain_success() -> void:
-	combo += 1
-	combo_time = combo_window()
-
-
-func break_combo() -> void:
-	combo = 0
-	combo_time = 0.0
-
-
-func roll_shop() -> void:
-	shop_stock = _pick_ids(SHOP.keys(), 3)
-
-
-func roll_reward() -> void:
-	reward_stock = _pick_ids(REWARDS.keys(), 3)
+## Each call adds popped bubbles. Returns how many level-ups that earned.
+func note_pops(count: int) -> int:
+	if count <= 0:
+		return 0
+	pops += count
+	pops_toward += count
+	var gained := 0
+	while pops_toward >= pops_needed:
+		pops_toward -= pops_needed
+		level += 1
+		pops_needed += 4
+		gained += 1
+	return gained
 
 
 func roll_level() -> void:
-	level_stock = _pick_ids(LEVEL_UPS.keys(), 3)
-
-
-func level_text() -> String:
-	return "等级 %d  ·  %d/%d" % [level, kills_toward, kills_needed]
-
-
-## One level after a short stretch of kills. The next stretch asks for one more kill.
-func note_kill() -> bool:
-	kills_toward += 1
-	if kills_toward < kills_needed:
-		return false
-	kills_toward = 0
-	level += 1
-	kills_needed += 1
-	return true
+	var pool: Array[String] = []
+	for key in LEVEL_UPS.keys():
+		var id := str(key)
+		if id == "book" and has_book:
+			continue
+		pool.append(id)
+	if not has_book and pool.has("book"):
+		pool.erase("book")
+		level_stock = ["book"]
+		var rest := _pick_from(pool, 2)
+		for id in rest:
+			level_stock.append(id)
+		return
+	level_stock = _pick_from(pool, 3)
 
 
 func apply_level(id: String) -> void:
 	match id:
-		"power":
-			spell_power += 0.12
-		"vital":
-			max_hp += 16
-			hp = mini(max_hp, hp + 16)
-		"freeze":
-			freeze_bonus += 0.35
-		"summon":
-			summon_bonus += 1.2
-		"tempo":
-			combo_step_bonus += 0.04
-			combo_window_bonus += 0.7
-		"white":
-			white_weight += 0.05
-		"purse":
-			gold += 20
-		"heal":
-			hp = mini(max_hp, hp + 24)
-
-
-func apply_shop(id: String) -> bool:
-	if not SHOP.has(id):
-		return false
-	var price := int(SHOP[id]["price"])
-	if gold < price:
-		return false
-	gold -= price
-	match id:
-		"heal":
-			hp = mini(max_hp, hp + 28)
+		"book":
+			has_book = true
+		"haste":
+			knife_interval = maxf(knife_interval - 0.3, 0.8)
 		"power":
 			spell_power += 0.15
+		"fire":
+			fire_bonus += 0.55
 		"freeze":
-			freeze_bonus += 0.45
-		"summon":
-			summon_bonus += 1.4
-		"vital":
-			max_hp += 20
-			hp = mini(max_hp, hp + 20)
-		"tempo":
-			combo_step_bonus += 0.05
-			combo_window_bonus += 0.8
-	return true
-
-
-func apply_reward(id: String) -> void:
-	match id:
-		"power":
-			spell_power += 0.2
-		"vital":
-			max_hp += 30
-			hp = mini(max_hp, hp + 30)
+			freeze_bonus += 0.8
+		"vine":
+			vine_bonus += 16.0
+		"bolt":
+			lightning_jumps += 1
 		"white":
-			white_weight += 0.06
-		"tempo":
-			combo_window_bonus += 1.6
-		"purse":
-			gold += 30
+			white_haste = true
 
 
-func apply_white(kind: String) -> String:
-	match kind:
-		"extra":
-			combo += 1
-			combo_time = combo_window()
-			return "额外连锁"
-		"empower":
-			empower_next = true
-			return "下一发强化"
-		"loot":
-			gold += 25
-			hp = mini(max_hp, hp + 18)
-			return "战利品 +25 金，生命 +18"
-		_:
-			return ""
+func apply_white(length: int) -> String:
+	var cut := 0.8
+	if is_super(length):
+		cut = 2.2
+	if white_haste:
+		cut += 0.6
+	return "冷却 -%.1f 秒" % cut
 
 
-## hits are dictionaries of color and pos, in the order the stroke passed them.
-## Color locks to the first gem. Later gems count only when they match and touch the previous accepted gem.
-## Touch is center distance, so the stroke may turn in any direction.
-static func resolve_touch_chain(hits: Array, touch: float) -> Dictionary:
-	if hits.is_empty():
-		return {"color": -1, "length": 0}
-	var color := int(hits[0]["color"])
-	var length := 1
-	var last: Vector2 = hits[0]["pos"]
-	for i in range(1, hits.size()):
-		var hit: Dictionary = hits[i]
-		if int(hit["color"]) != color:
-			continue
-		var pos: Vector2 = hit["pos"]
-		if pos.distance_to(last) > touch:
-			continue
-		length += 1
-		last = pos
-	return {"color": color, "length": length}
+func white_cooldown_cut(length: int) -> float:
+	var cut := 2.2 if is_super(length) else 0.8 as float
+	if white_haste:
+		cut += 0.6
+	return cut
 
 
-func _pick_ids(source: Array, count: int) -> Array[String]:
-	var pool: Array[String] = []
-	for item in source:
-		pool.append(str(item))
+static func row_width(row: int, cols: int) -> int:
+	return cols if row % 2 == 0 else cols - 1
+
+
+static func neighbors(col: int, row: int) -> Array:
+	var deltas: Array
+	if row % 2 == 0:
+		deltas = [[-1, 0], [1, 0], [-1, -1], [0, -1], [-1, 1], [0, 1]]
+	else:
+		deltas = [[-1, 0], [1, 0], [0, -1], [1, -1], [0, 1], [1, 1]]
+	var out: Array = []
+	for pair in deltas:
+		out.append(Vector2i(col + int(pair[0]), row + int(pair[1])))
+	return out
+
+
+static func same_color_component(cells: Array, start: int) -> Array:
+	if start < 0 or start >= cells.size():
+		return []
+	var origin: Dictionary = cells[start]
+	var color := int(origin["color"])
+	var index_at := {}
+	for i in cells.size():
+		var cell: Dictionary = cells[i]
+		index_at[_key(int(cell["col"]), int(cell["row"]))] = i
+	var seen := {}
+	var stack: Array = [start]
+	var found: Array[int] = []
+	seen[start] = true
+	while not stack.is_empty():
+		var current := int(stack.pop_back())
+		found.append(current)
+		var cell: Dictionary = cells[current]
+		for npos in neighbors(int(cell["col"]), int(cell["row"])):
+			var spot: Vector2i = npos
+			var key := _key(spot.x, spot.y)
+			if not index_at.has(key):
+				continue
+			var next := int(index_at[key])
+			if seen.has(next):
+				continue
+			if int(cells[next]["color"]) != color:
+				continue
+			seen[next] = true
+			stack.append(next)
+	return found
+
+
+static func floating_indices(cells: Array) -> Array:
+	var index_at := {}
+	var stack: Array = []
+	var seen := {}
+	for i in cells.size():
+		var cell: Dictionary = cells[i]
+		index_at[_key(int(cell["col"]), int(cell["row"]))] = i
+		if int(cell["row"]) == 0:
+			stack.append(i)
+			seen[i] = true
+	while not stack.is_empty():
+		var current := int(stack.pop_back())
+		var cell: Dictionary = cells[current]
+		for npos in neighbors(int(cell["col"]), int(cell["row"])):
+			var spot: Vector2i = npos
+			var key := _key(spot.x, spot.y)
+			if not index_at.has(key):
+				continue
+			var next := int(index_at[key])
+			if seen.has(next):
+				continue
+			seen[next] = true
+			stack.append(next)
+	var floating: Array[int] = []
+	for i in cells.size():
+		if not seen.has(i):
+			floating.append(i)
+	return floating
+
+
+static func _key(col: int, row: int) -> String:
+	return "%d:%d" % [col, row]
+
+
+func _pick_from(pool: Array[String], count: int) -> Array[String]:
+	var bag: Array[String] = pool.duplicate()
 	var picked: Array[String] = []
 	for _n in count:
-		if pool.is_empty():
+		if bag.is_empty():
 			break
-		var index := rng.randi() % pool.size()
-		picked.append(pool[index])
-		pool.remove_at(index)
+		var index := rng.randi() % bag.size()
+		picked.append(bag[index])
+		bag.remove_at(index)
 	return picked

@@ -2,9 +2,8 @@ extends Control
 
 const Rules = preload("res://scripts/run_state.gd")
 const BoardView = preload("res://scripts/board_view.gd")
-const LaneView = preload("res://scripts/lane_view.gd")
 
-enum Mode { START, ROUTE, COMBAT, SHOP, REWARD, LEVEL, WIN, LOSE }
+enum Mode { START, COMBAT, LEVEL, LOSE }
 
 const INK := Color("0e1116")
 const PAPER := Color("e7e4dc")
@@ -12,51 +11,32 @@ const MUTED := Color("9aa3b5")
 const GOLD := Color("f0d7a2")
 const DANGER := Color("e07a72")
 
-var state
+var state: Rules
 var mode := Mode.START
 var ui_lock := false
-var closing_fight := false
 var level_pending := 0
-var pending_clear := false
 
-var board
-var lane: Control
-var world: Control
-var world_base := Vector2(0, 78)
-var fx: Control
+var field
+var combat_root: Control
+var start_screen: Control
+var level_screen: Control
+var lose_screen: Control
+
+var wave_label: Label
+var pops_label: Label
+var level_label: Label
+var weapon_label: Label
+var next_label: Label
+var action_label: Label
+var level_box: HBoxContainer
+var level_title: Label
+var lose_detail: Label
+
 var flash: ColorRect
 var shake := 0.0
 var flash_alpha := 0.0
 var flash_color := Color.WHITE
-
-var combat_root: Control
-var start_screen: Control
-var route_screen: Control
-var shop_screen: Control
-var reward_screen: Control
-var level_screen: Control
-var win_screen: Control
-var lose_screen: Control
-
-var progress_label: Label
-var hp_label: Label
-var gold_label: Label
-var combo_label: Label
-var preview_label: Label
-var action_label: Label
-var empower_label: Label
-var seed_label: Label
-var level_label: Label
-var combo_fill: ColorRect
-var lamps: Array[ColorRect] = []
-var shop_gold: Label
-var shop_hint: Label
-var shop_box: VBoxContainer
-var reward_box: HBoxContainer
-var level_box: HBoxContainer
-var level_title: Label
-var win_detail: Label
-var lose_detail: Label
+var world: Control
 
 var sfx: Array[AudioStreamPlayer] = []
 var sfx_cursor := 0
@@ -70,41 +50,24 @@ func _ready() -> void:
 	_build_background()
 	_build_combat()
 	_build_start()
-	_build_route()
-	_build_shop()
-	_build_reward()
 	_build_level()
-	_build_win()
 	_build_lose()
 	_build_flash()
 	_build_audio()
-	board.setup(Callable(state, "roll_color"))
-	lane.set_fx(fx)
-	board.chain_resolved.connect(_on_chain)
-	board.chain_broken.connect(_on_broken)
-	board.path_changed.connect(_on_path)
-	board.board_note.connect(_on_board_note)
-	lane.player_damaged.connect(_on_player_damaged)
-	lane.foe_killed.connect(_on_killed)
-	lane.fight_cleared.connect(_on_fight_cleared)
-	lane.spell_hit.connect(_on_spell_hit)
+	field.chained.connect(_on_chained)
+	field.basics.connect(_on_basics)
+	field.cleared.connect(_on_cleared)
+	field.crushed.connect(_on_crushed)
+	field.waved.connect(_on_waved)
 	_show_start()
 
 
 func _process(delta: float) -> void:
 	_tick_shake(delta)
 	_tick_flash(delta)
-	if mode != Mode.COMBAT or closing_fight:
+	if mode != Mode.COMBAT:
 		return
-	if state.combo > 0:
-		state.combo_time = maxf(state.combo_time - delta, 0.0)
-		if state.combo_time <= 0.0:
-			state.break_combo()
-			_break_juice()
-		_paint_combo()
-	lane.tick(delta)
-	if level_pending > 0 and mode == Mode.COMBAT and not closing_fight and state.hp > 0:
-		_open_level()
+	_refresh_hud()
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -114,24 +77,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if not key.pressed or key.echo:
 		return
 	match mode:
-		Mode.START, Mode.WIN, Mode.LOSE:
+		Mode.START, Mode.LOSE:
 			if _is_accept(key.keycode):
 				_start_run()
 				get_viewport().set_input_as_handled()
-		Mode.ROUTE:
-			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
-				_pick_route(0)
-			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
-				_pick_route(1)
-			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
-				_pick_route(2)
-		Mode.REWARD:
-			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
-				_pick_reward(0)
-			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
-				_pick_reward(1)
-			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
-				_pick_reward(2)
 		Mode.LEVEL:
 			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
 				_pick_level(0)
@@ -139,15 +88,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				_pick_level(1)
 			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
 				_pick_level(2)
-		Mode.SHOP:
-			if key.keycode == KEY_1 or key.keycode == KEY_KP_1:
-				_buy(0)
-			elif key.keycode == KEY_2 or key.keycode == KEY_KP_2:
-				_buy(1)
-			elif key.keycode == KEY_3 or key.keycode == KEY_KP_3:
-				_buy(2)
-			elif _is_accept(key.keycode):
-				_leave_shop()
 
 
 func _start_run() -> void:
@@ -155,165 +95,111 @@ func _start_run() -> void:
 		return
 	ui_lock = true
 	state.start_run(_new_seed())
-	closing_fight = false
 	level_pending = 0
-	pending_clear = false
-	_show_route()
-	ui_lock = false
-
-
-func _pick_route(index: int) -> void:
-	if ui_lock or mode != Mode.ROUTE:
-		return
-	ui_lock = true
-	state.choose_route(index)
-	_enter_node()
-	ui_lock = false
-
-
-func _enter_node() -> void:
-	if state.route_done():
-		_show_win()
-		return
-	match state.current_kind():
-		"trash", "elite", "boss":
-			_start_fight()
-		"shop":
-			_open_shop()
-		"reward":
-			_open_reward()
-		_:
-			_show_win()
-
-
-func _start_fight() -> void:
 	mode = Mode.COMBAT
-	closing_fight = false
-	state.break_combo()
 	_show_only(combat_root)
-	board.refill()
-	board.accept_input = true
-	lane.freeze_bonus = state.freeze_bonus
-	lane.summon_bonus = state.summon_bonus
-	lane.begin_fight(state.current_kind(), state.trash_variant(), state.hp, state.max_hp)
-	action_label.text = "宝石从顶端落下，叠在场里。划过挨着的同色宝石来施法。"
-	preview_label.text = "同色相连，至少 3 颗。任意方向，要挨着"
+	field.begin(state)
+	action_label.text = "飞刀会自己发射。移动鼠标，或按左右键瞄准。"
 	_refresh_hud()
 	get_viewport().gui_release_focus()
+	ui_lock = false
 
 
-func _on_chain(color_index: int, length: int, origin: Vector2) -> void:
+func _on_chained(color_index: int, length: int, positions: Array) -> void:
 	if mode != Mode.COMBAT:
 		return
-	var school := str(state.school_of(color_index))
-	var empowered := bool(state.empower_next) and school != "white"
-	state.note_chain_success()
-	var kind := str(state.spell_kind(school, length))
-	var title := str(state.spell_title(school, length))
-	if school == "white":
-		var text := str(state.apply_white(kind))
-		if kind == "extra":
-			lane.apply_global_slow(1.6)
-		action_label.text = text
-		lane.flash_school("white")
-		_spark(origin, Rules.GEM_COLORS[4])
-	else:
-		var damage := float(state.chain_damage(length, state.combo, empowered))
-		if empowered:
-			state.empower_next = false
-		lane.cast(school, kind, damage, origin, empowered)
-		action_label.text = "%s  ·  %d" % [title, int(round(damage))]
-		if length >= Rules.SUPER_AT:
-			action_label.text += "  ·  大招"
-	_success_juice(color_index)
-	_refresh_hud()
-
-
-func _on_broken() -> void:
-	preview_label.text = "这一笔没有连上"
-	_refresh_hud()
-
-
-func _on_path(color_index: int, length: int) -> void:
-	if length <= 0 or color_index < 0:
-		preview_label.text = "同色相连，至少 3 颗。任意方向，要挨着"
+	var big: bool = state.is_super(length)
+	var title := Rules.SCHOOL_NAMES[color_index]
+	if color_index == 4:
+		var cut := state.white_cooldown_cut(length)
+		field.cut_cooldowns(cut)
+		action_label.text = "白宝石 · %d 连 · %s%s" % [
+			length, state.apply_white(length), "  ·  大招" if big else "",
+		]
+		_flash(Rules.GEM_COLORS[4], 0.22 if big else 0.12)
+		_play_tone(620.0, 0.08, 0.28)
+		field.refill_if_empty()
+		_refresh_hud()
 		return
-	var school := str(state.school_of(color_index))
-	if length < Rules.MIN_CHAIN:
-		preview_label.text = "%s  %d / 3" % [state.school_name(color_index), length]
-		return
-	if school == "white":
-		preview_label.text = "白宝石  ·  %d 连  ·  %s" % [length, state.spell_title(school, length)]
-		return
-	var empowered := bool(state.empower_next)
-	var damage := float(state.chain_damage(length, state.combo + 1, empowered))
-	preview_label.text = "%s  ·  %d 连  ·  ×%.2f  ·  预计 %d%s" % [
-		state.spell_title(school, length),
-		length,
-		state.length_multiplier(length),
-		int(round(damage)),
-		"  ·  已强化" if empowered else "",
+	var damage := state.chain_damage(length)
+	field.hurt_color(color_index, damage)
+	_apply_school(color_index, big, positions)
+	action_label.text = "%s · %d 连 · 全体 %d%s" % [
+		title, length, int(round(damage)), "  ·  大招" if big else "",
 	]
-
-
-func _on_board_note(text: String) -> void:
-	action_label.text = text
-
-
-func _on_player_damaged(amount: int) -> void:
-	if mode != Mode.COMBAT or state.hp <= 0:
-		return
-	state.hp = maxi(state.hp - amount, 0)
-	lane.set_player_hp(state.hp, state.max_hp)
-	shake = maxf(shake, 6.0)
+	_flash(Rules.GEM_COLORS[color_index], 0.28 if big else 0.14)
+	_play_tone(420.0 + float(length) * 28.0, 0.07, 0.3)
+	field.refill_if_empty()
 	_refresh_hud()
-	if state.hp <= 0:
-		board.accept_input = false
-		lane.stop()
-		_show_lose()
 
 
-func _on_killed(gold: int) -> void:
-	state.gold += gold
-	if state.note_kill():
-		level_pending += 1
+func _apply_school(color_index: int, big: bool, positions: Array) -> void:
+	match color_index:
+		0:
+			var radius := 84.0 * (1.0 + state.fire_bonus)
+			var extra := 24.0 * state.spell_power * (1.0 + state.fire_bonus)
+			if big:
+				radius *= 1.35
+				extra *= 1.6
+			field.burst_rings(positions, minf(radius, 130.0))
+			field.hurt_near(positions, radius, extra)
+		1:
+			var hold := 3.6 if big else 2.2 as float
+			field.freeze_for(hold + state.freeze_bonus)
+		2:
+			var hops := 2 if big else 1
+			var info: Dictionary = field.neighbor_pairs(positions, hops)
+			var vine := 20.0 * state.spell_power + state.vine_bonus
+			if big:
+				vine *= 1.7
+			field.vine_marks(info["pairs"])
+			field.hurt_ids(info["ids"], vine)
+		3:
+			var jumps := (3 if big else 1) + int(state.lightning_jumps)
+			var ids: Array = field.nearest_ids(positions, jumps, [])
+			var bolt := 28.0 * state.spell_power
+			if big:
+				bolt *= 1.5
+			field.hurt_ids(ids, bolt)
+
+
+func _on_basics(_color_index: int, amount: float, _at: Vector2) -> void:
+	action_label.text = "贴住了 · 基础伤害 %d" % int(round(amount))
+
+
+func _on_cleared(count: int) -> void:
+	var ups := state.note_pops(count)
+	if ups > 0:
+		level_pending += ups
+		call_deferred("_open_level_if_needed")
+	if mode == Mode.COMBAT:
+		_refresh_hud()
+
+
+func _on_crushed() -> void:
+	if mode != Mode.COMBAT:
+		return
+	field.stop()
+	_show_lose()
+
+
+func _on_waved(wave_number: int) -> void:
+	action_label.text = "这一团清掉了 · 第 %d 波" % wave_number
 	_refresh_hud()
-	_play_tone(660.0, 0.07, 0.22)
 
 
-func _on_fight_cleared() -> void:
-	if mode != Mode.COMBAT or state.hp <= 0 or closing_fight:
+func _open_level_if_needed() -> void:
+	if level_pending <= 0 or mode != Mode.COMBAT or field.dead:
 		return
-	if level_pending > 0:
-		pending_clear = true
-		return
-	_finish_fight()
-
-
-func _finish_fight() -> void:
-	if mode != Mode.COMBAT or state.hp <= 0 or closing_fight:
-		return
-	closing_fight = true
-	board.accept_input = false
-	action_label.text = "这一关清完了"
-	await get_tree().create_timer(0.7).timeout
-	closing_fight = false
-	if mode != Mode.COMBAT or state.hp <= 0:
-		return
-	if state.current_kind() == "boss":
-		_show_win()
-		return
-	state.advance()
-	_enter_node()
+	_open_level()
 
 
 func _open_level() -> void:
-	if level_pending <= 0 or mode != Mode.COMBAT or state.hp <= 0:
+	if level_pending <= 0 or mode != Mode.COMBAT or field.dead:
 		return
 	level_pending -= 1
 	mode = Mode.LEVEL
-	board.cancel_stroke()
-	board.accept_input = false
+	field.accept_input = false
 	state.roll_level()
 	_rebuild_level()
 	level_screen.visible = true
@@ -326,72 +212,18 @@ func _pick_level(index: int) -> void:
 	if index < 0 or index >= state.level_stock.size():
 		return
 	ui_lock = true
-	state.apply_level(str(state.level_stock[index]))
-	lane.freeze_bonus = state.freeze_bonus
-	lane.summon_bonus = state.summon_bonus
-	lane.set_player_hp(state.hp, state.max_hp)
+	var id := str(state.level_stock[index])
+	state.apply_level(id)
+	if id == "book":
+		field.arm_book()
 	level_screen.visible = false
 	mode = Mode.COMBAT
 	_refresh_hud()
 	ui_lock = false
-	if level_pending > 0 and state.hp > 0:
+	if level_pending > 0 and not field.dead:
 		_open_level()
 		return
-	if pending_clear:
-		pending_clear = false
-		_finish_fight()
-		return
-	board.accept_input = true
-
-
-func _on_spell_hit(_school: String) -> void:
-	shake = maxf(shake, 2.5)
-	_play_tone(210.0, 0.04, 0.16)
-
-
-func _open_shop() -> void:
-	mode = Mode.SHOP
-	state.roll_shop()
-	_rebuild_shop()
-	_show_only(shop_screen)
-
-
-func _buy(index: int) -> void:
-	if mode != Mode.SHOP or index < 0 or index >= state.shop_stock.size():
-		return
-	var id := str(state.shop_stock[index])
-	if id == "":
-		return
-	if not state.apply_shop(id):
-		shop_hint.text = "金币不足"
-		return
-	state.shop_stock[index] = ""
-	_rebuild_shop()
-	lane.set_player_hp(state.hp, state.max_hp)
-
-
-func _leave_shop() -> void:
-	if mode != Mode.SHOP:
-		return
-	state.advance()
-	_enter_node()
-
-
-func _open_reward() -> void:
-	mode = Mode.REWARD
-	state.roll_reward()
-	_rebuild_reward()
-	_show_only(reward_screen)
-
-
-func _pick_reward(index: int) -> void:
-	if ui_lock or mode != Mode.REWARD or index < 0 or index >= state.reward_stock.size():
-		return
-	ui_lock = true
-	state.apply_reward(str(state.reward_stock[index]))
-	state.advance()
-	_enter_node()
-	ui_lock = false
+	field.accept_input = true
 
 
 func _show_start() -> void:
@@ -399,117 +231,53 @@ func _show_start() -> void:
 	_show_only(start_screen)
 
 
-func _show_route() -> void:
-	mode = Mode.ROUTE
-	_show_only(route_screen)
-
-
-func _show_win() -> void:
-	mode = Mode.WIN
-	board.accept_input = false
-	lane.stop()
-	win_detail.text = "你走完了%s。\n种子  %d\n剩余生命  %d\n金币  %d" % [
-		state.route_name(), state.seed_value, state.hp, state.gold,
-	]
-	_show_only(win_screen)
-
-
 func _show_lose() -> void:
 	mode = Mode.LOSE
-	board.accept_input = false
-	lane.stop()
-	lose_detail.text = "倒在%s的%s。\n种子  %d\n金币  %d" % [
-		state.route_name(), Rules.node_title(state.current_kind()), state.seed_value, state.gold,
+	field.stop()
+	lose_detail.text = "气泡压到了你。\n第 %d 波\n消除  %d\n种子  %d" % [
+		state.wave, state.pops, state.seed_value,
 	]
 	_show_only(lose_screen)
 
 
 func _show_only(which: Control) -> void:
-	for screen in [start_screen, route_screen, combat_root, shop_screen, reward_screen, win_screen, lose_screen]:
+	for screen in [start_screen, combat_root, lose_screen]:
 		screen.visible = screen == which
 	if level_screen != null:
 		level_screen.visible = false
 
 
 func _refresh_hud() -> void:
-	progress_label.text = state.progress_text()
-	hp_label.text = "生命  %d / %d" % [state.hp, state.max_hp]
-	gold_label.text = "金币  %d" % state.gold
+	wave_label.text = "第 %d 波" % state.wave
+	pops_label.text = "消除  %d" % state.pops
 	level_label.text = state.level_text()
-	seed_label.text = "种子 %d" % state.seed_value
-	empower_label.text = "下一发已强化" if state.empower_next else ""
-	_paint_combo()
+	var weapons := "飞刀"
+	if state.has_book:
+		weapons += "  ·  法术书"
+	weapon_label.text = weapons
+	next_label.text = "下一发  %s" % Rules.COLOR_NAMES[field.next_color()]
 
 
-func _paint_combo() -> void:
-	if state.combo <= 0:
-		combo_label.text = "连击  0"
-		combo_fill.size.x = 0
-	else:
-		var bonus := int(round((state.combo_multiplier(state.combo) - 1.0) * 100.0))
-		combo_label.text = "连击  x%d    伤害 +%d%%" % [state.combo, bonus]
-		var window := maxf(state.combo_window(), 0.1)
-		combo_fill.size.x = 220.0 * clampf(state.combo_time / window, 0.0, 1.0)
-	for i in lamps.size():
-		var on: bool = i < state.combo
-		lamps[i].color = Color("f0d7a2") if on else Color("2a303c")
-		if on and state.combo >= 5:
-			lamps[i].modulate = Color(1.2, 1.05, 0.7)
-		else:
-			lamps[i].modulate = Color.WHITE
-
-
-func _success_juice(color_index: int) -> void:
-	var level := int(state.combo)
-	shake = 3.0 + float(mini(level, 10)) * 1.15
-	flash_alpha = 0.14 + float(mini(level, 8)) * 0.04
-	flash_color = Rules.GEM_COLORS[clampi(color_index, 0, Rules.GEM_COLORS.size() - 1)]
-	var pitch := 480.0 + float(level) * 42.0
-	_play_tone(pitch, 0.07, 0.34)
-	_play_tone(pitch * 1.25, 0.08, 0.26)
-	if level >= 3:
-		_play_tone(pitch * 1.5, 0.1, 0.28)
-	if level >= 5:
-		_play_tone(pitch * 1.9, 0.14, 0.24)
-	if level >= 8:
-		shake += 6.0
-		flash_alpha += 0.12
-
-
-func _break_juice() -> void:
-	shake = maxf(shake, 2.0)
-	flash_alpha = maxf(flash_alpha, 0.12)
-	flash_color = Color("6e3030")
-	_play_tone(130.0, 0.11, 0.28)
-
-
-func _spark(origin: Vector2, color: Color) -> void:
-	var gem := Polygon2D.new()
-	gem.polygon = PackedVector2Array([
-		Vector2(0, -12), Vector2(12, 0), Vector2(0, 12), Vector2(-12, 0),
-	])
-	gem.color = color
-	var holder := Node2D.new()
-	holder.add_child(gem)
-	fx.add_child(holder)
-	holder.global_position = origin
-	var dest := lane.global_position + Vector2(LaneView.LANE_W * 0.5, 58)
-	var tween := create_tween()
-	tween.tween_property(holder, "global_position", dest, 0.28)
-	tween.tween_callback(holder.queue_free)
+func _flash(color: Color, amount: float) -> void:
+	flash_color = color
+	flash_alpha = amount
+	shake = maxf(shake, 4.0 if amount > 0.2 else 2.0)
 
 
 func _tick_shake(delta: float) -> void:
+	var kick := Vector2.ZERO
 	if shake > 0.0:
-		world.position = world_base + Vector2(randf_range(-shake, shake), randf_range(-shake, shake))
+		kick = Vector2(randf_range(-shake, shake), randf_range(-shake, shake))
 		shake = maxf(shake - delta * 28.0, 0.0)
-	else:
-		world.position = world_base
+	world.offset_left = kick.x
+	world.offset_right = kick.x
+	world.offset_top = 96.0 + kick.y
+	world.offset_bottom = kick.y
 
 
 func _tick_flash(delta: float) -> void:
 	if flash_alpha > 0.0:
-		flash_alpha = maxf(flash_alpha - delta * 1.35, 0.0)
+		flash_alpha = maxf(flash_alpha - delta * 1.4, 0.0)
 	flash.color = flash_color
 	flash.modulate.a = flash_alpha
 
@@ -530,87 +298,47 @@ func _build_combat() -> void:
 
 	var hud := PanelContainer.new()
 	hud.position = Vector2(16, 10)
-	hud.size = Vector2(1248, 64)
+	hud.size = Vector2(1248, 78)
 	hud.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var hud_style := StyleBoxFlat.new()
 	hud_style.bg_color = Color("161b24")
 	hud_style.set_corner_radius_all(12)
 	hud_style.content_margin_left = 14
 	hud_style.content_margin_right = 14
-	hud_style.content_margin_top = 6
-	hud_style.content_margin_bottom = 6
+	hud_style.content_margin_top = 8
+	hud_style.content_margin_bottom = 8
 	hud.add_theme_stylebox_override("panel", hud_style)
 	combat_root.add_child(hud)
-	var hud_box := VBoxContainer.new()
-	hud_box.add_theme_constant_override("separation", 2)
-	hud.add_child(hud_box)
-	var top := HBoxContainer.new()
-	top.add_theme_constant_override("separation", 18)
-	hud_box.add_child(top)
-	progress_label = _label("路线", 16, GOLD)
-	hp_label = _label("生命", 16, PAPER)
-	gold_label = _label("金币", 16, PAPER)
+	var stack := VBoxContainer.new()
+	stack.add_theme_constant_override("separation", 2)
+	hud.add_child(stack)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 22)
+	stack.add_child(row)
+	wave_label = _label("第 1 波", 16, GOLD)
+	pops_label = _label("消除  0", 16, PAPER)
 	level_label = _label("等级  1", 16, PAPER)
-	seed_label = _label("种子", 14, MUTED)
-	top.add_child(progress_label)
-	top.add_child(hp_label)
-	top.add_child(gold_label)
-	top.add_child(level_label)
-	top.add_child(seed_label)
-	var bottom := HBoxContainer.new()
-	bottom.add_theme_constant_override("separation", 12)
-	hud_box.add_child(bottom)
-	combo_label = _label("连击  0", 15, GOLD)
-	bottom.add_child(combo_label)
-	var timer_track := ColorRect.new()
-	timer_track.custom_minimum_size = Vector2(220, 8)
-	timer_track.color = Color("2a303c")
-	timer_track.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	combo_fill = ColorRect.new()
-	combo_fill.color = Color("f0d7a2")
-	combo_fill.size = Vector2(0, 8)
-	combo_fill.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	timer_track.add_child(combo_fill)
-	bottom.add_child(timer_track)
-	for _i in 8:
-		var lamp := ColorRect.new()
-		lamp.custom_minimum_size = Vector2(14, 14)
-		lamp.color = Color("2a303c")
-		lamp.mouse_filter = Control.MOUSE_FILTER_IGNORE
-		bottom.add_child(lamp)
-		lamps.append(lamp)
-	empower_label = _label("", 15, Color("fff1b8"))
-	bottom.add_child(empower_label)
+	weapon_label = _label("飞刀", 16, GOLD)
+	next_label = _label("下一发  红", 16, PAPER)
+	row.add_child(wave_label)
+	row.add_child(pops_label)
+	row.add_child(level_label)
+	row.add_child(weapon_label)
+	row.add_child(next_label)
+	action_label = _label("", 16, GOLD, false)
+	stack.add_child(action_label)
 
 	world = Control.new()
-	world.position = world_base
-	world.size = Vector2(1280, 710)
 	world.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	world.set_anchors_preset(Control.PRESET_FULL_RECT)
+	world.offset_top = 96
 	combat_root.add_child(world)
-
-	board = BoardView.new()
-	board.position = Vector2(28, 8)
-	world.add_child(board)
-	lane = LaneView.new()
-	lane.position = Vector2(660, 4)
-	world.add_child(lane)
-
-	preview_label = _label("同色相连，至少 3 颗。任意方向，要挨着", 16, PAPER, true)
-	preview_label.position = Vector2(28, 516)
-	preview_label.size = Vector2(600, 44)
-	world.add_child(preview_label)
-	action_label = _label("", 18, GOLD, true)
-	action_label.position = Vector2(28, 562)
-	action_label.size = Vector2(600, 44)
-	world.add_child(action_label)
-	var legend := _label("红 火焰    蓝 寒冰    绿 藤蔓    紫 雷电    白 奖励", 14, MUTED)
-	legend.position = Vector2(28, 612)
-	world.add_child(legend)
-
-	fx = Control.new()
-	_cover(fx)
-	fx.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	combat_root.add_child(fx)
+	var holder := CenterContainer.new()
+	holder.set_anchors_preset(Control.PRESET_FULL_RECT)
+	holder.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	world.add_child(holder)
+	field = BoardView.new()
+	holder.add_child(field)
 
 
 func _build_start() -> void:
@@ -618,23 +346,23 @@ func _build_start() -> void:
 	var panel := _card(Color("161b24"))
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 10)
-	box.custom_minimum_size = Vector2(620, 0)
+	box.custom_minimum_size = Vector2(640, 0)
 	panel.add_child(box)
 	var title := _label("消消乐 Rogue", 40, GOLD)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
-	var sub := _label("左边落下的宝石叠成一堆，右边打一条路", 18, MUTED)
+	var sub := _label("顶上是一团彩色怪物，你在底下瞄准", 18, MUTED)
 	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(sub)
 	var rules := _label(
-		"宝石从左边场地的顶端慢慢落下，左右和底部是墙，宝石会叠起来。堆到顶就先不再落下，直到你消出空位。\n\n按住鼠标划过彼此挨着的同色宝石。方向不限，也不用对齐格子。同色至少连上 3 颗才会消除并施法，第 4 颗起每多 1 颗伤害 ×1.15，6 颗及以上是大招。不够 3 颗什么都不会发生，宝石留在原地。消掉之后，上面的会落下来。\n\n红是火焰，蓝是寒冰，绿是藤蔓，紫是雷电。白宝石不攻击，而是额外连锁、强化下一发，或一份战利品。\n\n敌人从右边赛道的底部往上走，你站在顶端。连上的同一刻，右边就会闪光并命中。连着打会提高连击。杀敌一段之后会升级，从几项强化里选一个，效果留到这局结束。",
+		"怪物像泡泡挂在天花板上，会慢慢往下压。你站在底部，移动鼠标或按左右键瞄准，武器会按时间自己往上射。\n\n飞刀每 2 秒连射三发：红、红、紫。打中不同颜色只会造成一点基础伤害，子弹会粘在上面。同色连上 3 颗就会炸掉那一团，并且这一色的每只怪物都吃到连锁伤害，再附加流派效果：红是火焰爆发，蓝是冰冻，绿是藤蔓，紫是闪电，白是奖励。6 颗及以上是大招。\n\n消除一段之后会升级，从 3 项强化里选 1 个，只留到这局结束。法术书也在这些选择里：每 5 秒连射蓝、蓝、蓝、白、白、紫、紫。气泡压到你身上，这局就结束。",
 		16,
 		PAPER,
 		true
 	)
-	rules.custom_minimum_size = Vector2(580, 0)
+	rules.custom_minimum_size = Vector2(600, 0)
 	box.add_child(rules)
-	var button := _button("选择路线")
+	var button := _button("开始游戏")
 	button.pressed.connect(_start_run)
 	box.add_child(button)
 	var hint := _label("回车或空格也可以开始", 14, MUTED)
@@ -644,115 +372,6 @@ func _build_start() -> void:
 	add_child(start_screen)
 
 
-func _build_route() -> void:
-	route_screen = _full_center()
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 14)
-	route_screen.add_child(box)
-	var title := _label("选择一条路线", 36, GOLD)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(title)
-	var sub := _label("三条路都按顺序走完，没有地图。", 16, MUTED)
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(sub)
-	var row := HBoxContainer.new()
-	row.add_theme_constant_override("separation", 16)
-	row.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_child(row)
-	var tints: Array[Color] = [Color("243044"), Color("3a3224"), Color("24362f")]
-	for i in Rules.ROUTES.size():
-		var info: Dictionary = Rules.ROUTES[i]
-		var panel := _card(tints[i])
-		panel.custom_minimum_size = Vector2(280, 280)
-		var inner := VBoxContainer.new()
-		inner.add_theme_constant_override("separation", 8)
-		panel.add_child(inner)
-		var name := _label(str(info["name"]), 24, GOLD)
-		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		inner.add_child(name)
-		var blurb := _label(str(info["blurb"]), 15, PAPER, true)
-		blurb.custom_minimum_size = Vector2(240, 48)
-		inner.add_child(blurb)
-		var steps := _label(Rules.route_steps_text(i), 14, MUTED, true)
-		steps.custom_minimum_size = Vector2(240, 72)
-		inner.add_child(steps)
-		var button := _button("走这条")
-		button.pressed.connect(_pick_route.bind(i))
-		inner.add_child(button)
-		row.add_child(panel)
-	var hint := _label("按 1 / 2 / 3 选择", 14, MUTED)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(hint)
-	add_child(route_screen)
-
-
-func _build_shop() -> void:
-	shop_screen = _full_center()
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 12)
-	shop_screen.add_child(box)
-	var title := _label("商店", 36, GOLD)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(title)
-	shop_gold = _label("金币  0", 18, PAPER)
-	shop_gold.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(shop_gold)
-	shop_box = VBoxContainer.new()
-	shop_box.add_theme_constant_override("separation", 8)
-	shop_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_child(shop_box)
-	shop_hint = _label("", 15, DANGER)
-	shop_hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(shop_hint)
-	var leave := _button("离开商店")
-	leave.pressed.connect(_leave_shop)
-	box.add_child(leave)
-	var hint := _label("1 / 2 / 3 购买，回车离开", 14, MUTED)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(hint)
-	add_child(shop_screen)
-
-
-func _rebuild_shop() -> void:
-	shop_gold.text = "金币  %d    生命  %d / %d" % [state.gold, state.hp, state.max_hp]
-	shop_hint.text = ""
-	for child in shop_box.get_children():
-		child.queue_free()
-	for i in state.shop_stock.size():
-		var id := str(state.shop_stock[i])
-		var button := _button("")
-		button.custom_minimum_size = Vector2(520, 52)
-		if id == "" or not Rules.SHOP.has(id):
-			button.text = "已购买"
-			button.disabled = true
-		else:
-			var info: Dictionary = Rules.SHOP[id]
-			button.text = "%s    %d 金    %s" % [info["name"], int(info["price"]), info["desc"]]
-			button.pressed.connect(_buy.bind(i))
-		shop_box.add_child(button)
-
-
-func _build_reward() -> void:
-	reward_screen = _full_center()
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 12)
-	reward_screen.add_child(box)
-	var title := _label("选择一项奖赏", 36, GOLD)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(title)
-	var sub := _label("效果保留到这局结束", 16, MUTED)
-	sub.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(sub)
-	reward_box = HBoxContainer.new()
-	reward_box.add_theme_constant_override("separation", 16)
-	reward_box.alignment = BoxContainer.ALIGNMENT_CENTER
-	box.add_child(reward_box)
-	var hint := _label("按 1 / 2 / 3 选择", 14, MUTED)
-	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(hint)
-	add_child(reward_screen)
-
-
 func _build_level() -> void:
 	level_screen = Control.new()
 	_cover(level_screen)
@@ -760,7 +379,7 @@ func _build_level() -> void:
 	level_screen.z_index = 40
 	level_screen.mouse_filter = Control.MOUSE_FILTER_STOP
 	var dim := ColorRect.new()
-	dim.color = Color(0, 0, 0, 0.36)
+	dim.color = Color(0, 0, 0, 0.34)
 	dim.mouse_filter = Control.MOUSE_FILTER_STOP
 	_cover(dim)
 	level_screen.add_child(dim)
@@ -788,7 +407,7 @@ func _build_level() -> void:
 
 
 func _rebuild_level() -> void:
-	level_title.text = "升到 %d 级" % state.level
+	level_title.text = "升到 %d 级" % (state.level - level_pending)
 	for child in level_box.get_children():
 		child.queue_free()
 	var tints: Array[Color] = [Color("243044"), Color("24362f"), Color("3a3224")]
@@ -796,7 +415,7 @@ func _rebuild_level() -> void:
 		var id := str(state.level_stock[i])
 		var info: Dictionary = Rules.LEVEL_UPS[id]
 		var panel := _card(tints[i % tints.size()])
-		panel.custom_minimum_size = Vector2(250, 220)
+		panel.custom_minimum_size = Vector2(250, 230)
 		var inner := VBoxContainer.new()
 		inner.add_theme_constant_override("separation", 8)
 		panel.add_child(inner)
@@ -804,57 +423,12 @@ func _rebuild_level() -> void:
 		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 		inner.add_child(name)
 		var desc := _label(str(info["desc"]), 15, PAPER, true)
-		desc.custom_minimum_size = Vector2(210, 72)
+		desc.custom_minimum_size = Vector2(210, 84)
 		inner.add_child(desc)
 		var button := _button("拿下")
 		button.pressed.connect(_pick_level.bind(i))
 		inner.add_child(button)
 		level_box.add_child(panel)
-
-
-func _rebuild_reward() -> void:
-	for child in reward_box.get_children():
-		child.queue_free()
-	var tints: Array[Color] = [Color("243044"), Color("24362f"), Color("3a3224")]
-	for i in state.reward_stock.size():
-		var id := str(state.reward_stock[i])
-		var info: Dictionary = Rules.REWARDS[id]
-		var panel := _card(tints[i % tints.size()])
-		panel.custom_minimum_size = Vector2(250, 220)
-		var inner := VBoxContainer.new()
-		inner.add_theme_constant_override("separation", 8)
-		panel.add_child(inner)
-		var name := _label(str(info["name"]), 22, GOLD)
-		name.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-		inner.add_child(name)
-		var desc := _label(str(info["desc"]), 15, PAPER, true)
-		desc.custom_minimum_size = Vector2(210, 72)
-		inner.add_child(desc)
-		var button := _button("拿走")
-		button.pressed.connect(_pick_reward.bind(i))
-		inner.add_child(button)
-		reward_box.add_child(panel)
-
-
-func _build_win() -> void:
-	win_screen = _full_center()
-	var panel := _card(Color("161b24"))
-	var box := VBoxContainer.new()
-	box.add_theme_constant_override("separation", 12)
-	box.custom_minimum_size = Vector2(460, 0)
-	panel.add_child(box)
-	var title := _label("路线清空", 40, GOLD)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	box.add_child(title)
-	win_detail = _label("", 18, PAPER, true)
-	win_detail.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	win_detail.custom_minimum_size = Vector2(420, 0)
-	box.add_child(win_detail)
-	var button := _button("再来一局")
-	button.pressed.connect(_start_run)
-	box.add_child(button)
-	win_screen.add_child(panel)
-	add_child(win_screen)
 
 
 func _build_lose() -> void:
@@ -864,7 +438,7 @@ func _build_lose() -> void:
 	box.add_theme_constant_override("separation", 12)
 	box.custom_minimum_size = Vector2(460, 0)
 	panel.add_child(box)
-	var title := _label("你倒下了", 40, DANGER)
+	var title := _label("气泡压到了你", 40, DANGER)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	box.add_child(title)
 	lose_detail = _label("", 18, PAPER, true)

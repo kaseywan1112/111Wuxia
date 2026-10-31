@@ -10,13 +10,10 @@ func _init() -> void:
 
 
 func _run() -> void:
-	_test_multiplier()
-	_test_schools()
-	_test_path_rules()
-	_test_level_ups()
-	_test_routes()
-	_test_combo_and_white()
-	_test_tank_and_kill()
+	_test_damage()
+	_test_weapons()
+	_test_cluster()
+	_test_levels()
 	if errors.is_empty():
 		print("SIM_OK")
 		quit(0)
@@ -25,164 +22,94 @@ func _run() -> void:
 	quit(1)
 
 
-func _test_multiplier() -> void:
-	var state = Rules.new()
-	state.start_run(7)
-	var three := float(state.chain_damage(3, 1, false))
-	var four := float(state.chain_damage(4, 1, false))
-	var six := float(state.chain_damage(6, 1, false))
-	_check(_near(four / three, Rules.STEP_MULT), "4th gem multiplies by 1.15, got %s" % str(four / three))
-	_check(_near(six / three, pow(Rules.STEP_MULT, 3.0)), "two extra steps compound")
-	_check(float(state.chain_damage(2, 1, false)) == 0.0, "short chain deals nothing")
-	_check(six > four and four > three, "longer chains hit harder")
-	var empowered := float(state.chain_damage(3, 1, true))
-	_check(empowered > three * 1.5, "empower is a large bonus")
-
-
-func _test_schools() -> void:
-	var state = Rules.new()
-	_check(state.spell_kind("fire", 3) == "fireball", "fire 3 is a fireball")
-	_check(state.spell_kind("fire", 4) == "burn", "fire 4 burns")
-	_check(state.spell_kind("fire", 6) == "explosion", "fire 6 explodes")
-	_check(state.spell_kind("ice", 3) == "spike", "ice spike")
-	_check(state.spell_kind("ice", 5) == "freeze", "ice freeze")
-	_check(state.spell_kind("ice", 6) == "wall", "ice wall super")
-	_check(state.spell_kind("vine", 3) == "lash", "vine lash")
-	_check(state.spell_kind("vine", 4) == "entangle", "vine entangle")
-	_check(state.spell_kind("vine", 8) == "summon", "vine summon super")
-	_check(state.spell_kind("lightning", 3) == "bolt", "lightning bolt")
-	_check(state.spell_kind("lightning", 4) == "chain", "lightning chains")
-	_check(state.spell_kind("lightning", 6) == "stun", "lightning stun super")
-	_check(state.spell_kind("white", 3) == "extra", "white 3 is extra chain")
-	_check(state.spell_kind("white", 5) == "empower", "white 5 empowers")
-	_check(state.spell_kind("white", 6) == "loot", "white 6 is a reward")
-	_check(state.spell_kind("fire", 5) != "explosion", "5 is not yet a super")
-
-
-func _test_path_rules() -> void:
-	var touch := 50.0
-	var diagonal: Dictionary = Rules.resolve_touch_chain([
-		{"color": 0, "pos": Vector2(0, 0)},
-		{"color": 0, "pos": Vector2(30, 30)},
-		{"color": 0, "pos": Vector2(60, 60)},
-	], touch)
-	_check(int(diagonal["color"]) == 0 and int(diagonal["length"]) == 3, "a diagonal touch chain counts")
-	var bend: Dictionary = Rules.resolve_touch_chain([
-		{"color": 2, "pos": Vector2(0, 0)},
-		{"color": 2, "pos": Vector2(40, 0)},
-		{"color": 2, "pos": Vector2(40, 40)},
-	], touch)
-	_check(int(bend["color"]) == 2 and int(bend["length"]) == 3, "the stroke can turn any direction")
-	var gap: Dictionary = Rules.resolve_touch_chain([
-		{"color": 0, "pos": Vector2(0, 0)},
-		{"color": 0, "pos": Vector2(100, 0)},
-		{"color": 0, "pos": Vector2(200, 0)},
-	], touch)
-	_check(int(gap["length"]) == 1, "a gap does not extend the chain")
-	var blocked: Dictionary = Rules.resolve_touch_chain([
-		{"color": 0, "pos": Vector2(0, 0)},
-		{"color": 1, "pos": Vector2(40, 0)},
-		{"color": 0, "pos": Vector2(80, 0)},
-	], touch)
-	_check(int(blocked["color"]) == 0 and int(blocked["length"]) == 1, "a different color does not bridge a gap")
-	var through: Dictionary = Rules.resolve_touch_chain([
-		{"color": 0, "pos": Vector2(0, 0)},
-		{"color": 1, "pos": Vector2(20, 20)},
-		{"color": 0, "pos": Vector2(36, 0)},
-	], touch)
-	_check(int(through["length"]) == 2, "a different color is skipped when the next gem still touches")
-	var short: Dictionary = Rules.resolve_touch_chain([
-		{"color": 0, "pos": Vector2(0, 0)},
-		{"color": 0, "pos": Vector2(40, 0)},
-	], touch)
-	_check(int(short["length"]) == 2 and int(short["color"]) == 0, "two touching gems are not a cast")
-	var none: Dictionary = Rules.resolve_touch_chain([], touch)
-	_check(int(none["length"]) == 0 and int(none["color"]) == -1, "an empty stroke has no color")
-	var six_hits: Array = []
-	for i in 6:
-		six_hits.append({"color": 3, "pos": Vector2(float(i) * 40.0, 0)})
-	var six: Dictionary = Rules.resolve_touch_chain(six_hits, touch)
-	_check(int(six["color"]) == 3 and int(six["length"]) == 6, "six touching gems is the super length")
-	_check(Rules.SUPER_AT == 6 and int(six["length"]) >= Rules.SUPER_AT, "length 6 reaches the super")
-
-
-func _test_level_ups() -> void:
-	var state = Rules.new()
-	state.start_run(9)
-	_check(state.note_kill() == false, "the first kill does not level")
-	_check(state.note_kill() == false, "the second kill does not level")
-	_check(state.note_kill(), "the third kill levels up")
-	_check(state.level == 2 and state.kills_needed == 4 and state.kills_toward == 0, "the next stretch asks for one more kill")
-	state.roll_level()
-	_check(state.level_stock.size() == 3, "a level offers three choices")
-	var seen := {}
-	for id in state.level_stock:
-		_check(Rules.LEVEL_UPS.has(str(id)), "level choice exists")
-		_check(not seen.has(str(id)), "level choices are distinct")
-		seen[str(id)] = true
-	var power_before := float(state.spell_power)
-	state.apply_level("power")
-	_check(state.spell_power == power_before + 0.12, "level power lasts on the run")
-	var gold_before := int(state.gold)
-	state.apply_level("purse")
-	_check(state.gold == gold_before + 20, "level gold does not spend gold")
-	state.start_run(9)
-	_check(state.level == 1 and state.spell_power == 1.0 and state.gold == 0, "a new run clears level picks")
-
-
-func _test_routes() -> void:
-	_check(Rules.ROUTES.size() == 3, "three route sets")
-	for i in Rules.ROUTES.size():
-		var nodes: Array = Rules.ROUTES[i]["nodes"]
-		for kind in ["trash", "elite", "shop", "reward", "boss"]:
-			_check(nodes.has(kind), "%s missing %s" % [Rules.ROUTES[i]["name"], kind])
-		_check(str(nodes[nodes.size() - 1]) == "boss", "route ends on the boss")
+func _test_damage() -> void:
 	var state = Rules.new()
 	state.start_run(3)
-	state.choose_route(1)
-	_check(state.current_kind() == "trash", "steep route starts with trash")
-	state.advance()
-	_check(state.current_kind() == "elite", "then the elite")
+	var three := float(state.chain_damage(3))
+	var four := float(state.chain_damage(4))
+	var six := float(state.chain_damage(6))
+	_check(three == Rules.CHAIN_BASE, "a 3-chain is the base hit")
+	_check(_near(four / three, Rules.STEP_MULT), "each extra bubble multiplies by 1.15")
+	_check(_near(six / three, pow(Rules.STEP_MULT, 3.0)), "three extra steps compound")
+	_check(float(state.chain_damage(2)) == 0.0, "fewer than 3 is not a chain")
+	_check(Rules.BASIC_DAMAGE < three * 0.5, "a different color only deals small basic damage")
+	_check(state.is_super(6) and not state.is_super(5), "6+ is the super")
+	_check(six < Rules.MONSTER_HP, "one chain hit does not erase a fresh monster")
+	_check(Rules.BASIC_DAMAGE * 3 < Rules.MONSTER_HP, "a few basic hits do not pop a monster")
 
 
-func _test_combo_and_white() -> void:
+func _test_weapons() -> void:
+	_check(Rules.KNIFE_INTERVAL == 2.0, "the knife fires every 2 seconds")
+	_check(Rules.BOOK_INTERVAL == 5.0, "the spellbook fires every 5 seconds")
+	_check(Rules.KNIFE_SEQUENCE == [0, 0, 3], "knife sequence is red red purple")
+	_check(Rules.BOOK_SEQUENCE == [1, 1, 1, 4, 4, 3, 3], "book sequence is three blue, two white, two purple")
 	var state = Rules.new()
-	state.start_run(11)
-	state.note_chain_success()
-	state.note_chain_success()
-	_check(state.combo == 2, "chains raise combo")
-	_check(state.combo_multiplier(2) > 1.0, "combo grants a damage buff")
-	state.break_combo()
-	_check(state.combo == 0, "a broken chain drops combo")
-	state.note_chain_success()
-	var text := str(state.apply_white("extra"))
-	_check(state.combo == 2 and text.contains("额外"), "white extra chain adds combo")
-	_check(state.apply_white("empower") != "" and state.empower_next, "white empowers the next spell")
-	var gold_before := int(state.gold)
-	var hp_before := int(state.hp)
-	state.hp = 40
-	state.apply_white("loot")
-	_check(state.gold == gold_before + 25, "white loot pays gold")
-	_check(state.hp == hp_before - 0 + 18 or state.hp == 58, "white loot heals")
-	_check(state.hp == 58, "heal landed, hp %d" % state.hp)
+	state.start_run(1)
+	_check(not state.has_book, "a run starts with the knife only")
+	state.apply_level("book")
+	_check(state.has_book, "the spellbook is a level-up choice")
 
 
-func _test_tank_and_kill() -> void:
+func _test_cluster() -> void:
+	var reds: Array = [
+		{"col": 5, "row": 0, "color": 0},
+		{"col": 6, "row": 0, "color": 0},
+		{"col": 5, "row": 1, "color": 0},
+	]
+	var group: Array = Rules.same_color_component(reds, 0)
+	_check(group.size() == 3, "three touching bubbles of one color connect, including diagonally on the hex")
+	var bent: Array = [
+		{"col": 4, "row": 2, "color": 2},
+		{"col": 5, "row": 2, "color": 2},
+		{"col": 5, "row": 3, "color": 2},
+	]
+	_check(Rules.same_color_component(bent, 0).size() == 3, "the link can turn")
+	var gap: Array = [
+		{"col": 1, "row": 0, "color": 0},
+		{"col": 2, "row": 0, "color": 1},
+		{"col": 3, "row": 0, "color": 0},
+	]
+	_check(Rules.same_color_component(gap, 0).size() == 1, "a different color does not bridge a chain")
+	var apart: Array = [
+		{"col": 0, "row": 0, "color": 3},
+		{"col": 2, "row": 0, "color": 3},
+	]
+	_check(Rules.same_color_component(apart, 0).size() == 1, "a gap does not connect")
+	var ceiling: Array = [
+		{"col": 0, "row": 0, "color": 1},
+		{"col": 0, "row": 1, "color": 2},
+		{"col": 4, "row": 3, "color": 0},
+	]
+	var floating: Array = Rules.floating_indices(ceiling)
+	_check(floating.size() == 1 and int(floating[0]) == 2, "a bubble that lost the ceiling falls")
+	var hung: Array = [
+		{"col": 1, "row": 0, "color": 0},
+		{"col": 1, "row": 1, "color": 3},
+	]
+	_check(Rules.floating_indices(hung).is_empty(), "anything still touching the ceiling stays")
+
+
+func _test_levels() -> void:
 	var state = Rules.new()
-	state.start_run(5)
-	var grunt := float(Rules.FOES["grunt"]["hp"])
-	var one := float(state.chain_damage(6, 1, false))
-	_check(one < grunt * 0.5, "one super does not erase a grunt, %s vs %s" % [str(one), str(grunt)])
-	var eight := float(state.chain_damage(8, 6, true))
-	_check(eight < grunt, "even a long empowered chain leaves a grunt standing")
-	var hp := grunt
-	var combo := 0
-	for _i in 16:
-		combo += 1
-		hp -= float(state.chain_damage(4, combo, false))
-	_check(hp <= 0.0, "a run of chains can still drop a grunt")
-	for school in ["fire", "ice", "vine", "lightning"]:
-		_check(state.spell_kind(school, 6) != state.spell_kind("white", 6), "white is not a spell school")
+	state.start_run(9)
+	_check(state.note_pops(11) == 0, "eleven pops are not yet a level")
+	_check(state.note_pops(1) == 1, "the twelfth pop levels up")
+	_check(state.level == 2 and state.pops_needed == 16 and state.pops_toward == 0, "the next stretch asks for four more pops")
+	state.roll_level()
+	_check(state.level_stock.size() == 3, "three choices")
+	_check(str(state.level_stock[0]) == "book", "the spellbook is offered until taken")
+	var seen := {}
+	for id in state.level_stock:
+		_check(Rules.LEVEL_UPS.has(str(id)), "choice exists")
+		_check(not seen.has(str(id)), "choices are distinct")
+		seen[str(id)] = true
+	state.apply_level("power")
+	_check(_near(state.spell_power, 1.15), "power lasts the run")
+	state.apply_level("book")
+	state.roll_level()
+	_check(not state.level_stock.has("book"), "the book is not offered twice")
+	state.start_run(9)
+	_check(state.level == 1 and not state.has_book and state.spell_power == 1.0 and state.pops == 0, "a new run clears the picks")
 
 
 func _near(a: float, b: float) -> bool:
