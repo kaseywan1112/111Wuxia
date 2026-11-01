@@ -69,22 +69,20 @@ func _loot() -> void:
 func _weapons() -> void:
 	var state: Rules = Rules.new()
 	state.begin_run(1)
-	_check(state.weapon == "chain", "start with 连弹")
-	_check(state.weapon_bounces() < 0 and state.weapon_life() > 0.0, "连弹 bounces until it times out")
-	_check(not state.weapon_needs_catch(), "连弹 does not need a catch")
-	state.take_weapon("return")
-	_check(state.weapon_needs_catch(), "回手 must be caught")
-	_check(state.weapon_life() < 0.0, "回手 stays out until the catch")
-	var chain_damage := float(Rules.WEAPONS["chain"]["damage"])
-	var hammer_damage := float(Rules.WEAPONS["hammer"]["damage"])
-	_check(hammer_damage > chain_damage * 2.0, "重锤 hits harder")
-	_check(int(Rules.WEAPONS["hammer"]["bounces"]) >= 0, "重锤 runs out of bounces")
-	_check(float(Rules.WEAPONS["hammer"]["speed"]) < float(Rules.WEAPONS["chain"]["speed"]), "重锤 is slower")
-	_check(float(Rules.WEAPONS["hammer"]["damp"]) < 0.7, "重锤 bounces less")
-	_check(state.take_weapon("return"), "回手 can be chosen")
+	_check(state.weapon == "red", "the turret starts on 直击")
+	_check(state.weapon_style() == "hit", "直击 is a single hit")
+	_check(state.weapon_style("blue") == "pierce", "贯穿 passes through")
+	_check(state.weapon_style("green") == "splash", "溅射 splashes")
+	_check(state.weapon_style("purple") == "slow", "迟滞 slows")
+	_check(state.weapon_style("gold") == "guard", "护体 mends the wall")
+	_check(state.burst_count(0) == 2, "直击 fires twice on a four-match")
+	_check(state.burst_count(2) == 3, "溅射 fires three times on a four-match")
+	_check(state.burst_count(4) == 3, "护体 mends three times on a four-match")
+	state.set_main_from_color(3)
+	_check(state.weapon == "purple", "the last match becomes the auto weapon")
 	state.begin_run(4)
-	_check(state.weapon == "chain", "a new run starts on 连弹")
-	_check(state.owns_weapon("return"), "a chosen weapon stays known")
+	_check(state.weapon == "red", "a new run starts on 直击 again")
+	_check(state.owns_weapon("gold"), "all five weapons stay known")
 
 
 func _later_area() -> void:
@@ -113,10 +111,8 @@ func _growth() -> void:
 	state.apply_pick("catch")
 	state.apply_pick("rate")
 	_check(state.run_damage == 4 and state.run_bounce == 1, "picks raise the run")
-	_check(state.catch_gold() == 12, "catch bonus grew")
-	_check(state.weapon_speed() > float(Rules.WEAPONS["chain"]["speed"]), "fire rate speeds the ball")
-	state.take_weapon("hammer")
-	_check(state.weapon_bounces() == int(Rules.WEAPONS["hammer"]["bounces"]) + 1, "extra bounce on 重锤")
+	_check(state.guard_amount() == 12, "guard bonus grew")
+	_check(state.auto_interval() < 1.25, "fire rate shortens the charge")
 	state.fail_run()
 	_check(state.run_damage == 0 and state.run_catch == 0 and state.catch_gold() == 8, "run picks are lost on death")
 	state.stash_gold = 40
@@ -141,35 +137,26 @@ func _growth() -> void:
 
 
 func _gems() -> void:
-	var cols := 4
-	var colors: Array = []
-	var kinds: Array = []
-	colors.resize(8)
-	kinds.resize(8)
-	colors.fill(0)
-	kinds.fill(0)
-	colors[2] = 1
-	kinds[1] = 1
-	var started: Dictionary = Gems.try_extend([], Vector2i(0, 0), colors, kinds, cols)
-	_check(str(started["action"]) == "start", "a path can start on a gem")
-	var straight: Dictionary = Gems.try_extend(started["path"], Vector2i(1, 0), colors, kinds, cols)
-	_check(str(straight["action"]) == "add", "an adjacent gem extends the path")
-	var turned: Dictionary = Gems.try_extend(straight["path"], Vector2i(1, 1), colors, kinds, cols)
-	_check(str(turned["action"]) == "add", "the path can turn")
-	var diagonal: Dictionary = Gems.try_extend(started["path"], Vector2i(1, 1), colors, kinds, cols)
-	_check(str(diagonal["action"]) == "ignore", "a diagonal step is refused")
-	var other: Dictionary = Gems.try_extend(straight["path"], Vector2i(2, 0), colors, kinds, cols)
-	_check(str(other["action"]) == "ignore", "a different color does not join")
-	var odd: Dictionary = Gems.try_extend(started["path"], Vector2i(3, 1), colors, kinds, cols)
-	_check(str(odd["action"]) == "ignore", "a gem that is not adjacent stays out")
-	kinds[5] = 2
-	var special: Dictionary = Gems.try_extend(straight["path"], Vector2i(1, 1), colors, kinds, cols)
-	_check(str(special["action"]) == "add", "a special gem can join any color")
-	var effects := Gems.effects_of(special["path"], kinds, cols)
-	_check(effects.has("reverse") and effects.has("split"), "the chain keeps both odd gems")
-	var undone: Dictionary = Gems.try_extend(special["path"], Vector2i(1, 0), colors, kinds, cols)
-	_check(str(undone["action"]) == "undo" and undone["path"].size() == 2, "dragging back undoes a step")
-	_check(Gems.MIN_CHAIN == 3, "a chain needs three gems")
+	var cols := 3
+	var grid := [
+		1, 4, 2,
+		3, 7, 5,
+		6, 7, 8,
+		4, 7, 4,
+	]
+	var found := Gems.find_matches(grid, cols)
+	_check(found.size() == 1 and int(found[0]["length"]) == 3, "three in a line clears")
+	_check(Gems.kind_for_length(3) == "shot", "a three-match is one shot")
+	var cleared := Gems.clear_cells(grid, cols, found[0]["cells"])
+	var fallen := Gems.collapse(cleared, cols, 4, 9)
+	var again := Gems.find_matches(fallen, cols)
+	_check(not again.is_empty() and int(again[0]["color"]) == 4, "gems falling can cascade")
+	var four := [0, 0, 0, 0, 1, 2, 3, 2, 3, 1]
+	var fours := Gems.find_matches(four, 5)
+	_check(int(fours[0]["length"]) == 4 and Gems.kind_for_length(4) == "burst", "four of a color is a burst")
+	var five := [0, 0, 0, 0, 0, 1, 2, 1, 2, 1]
+	var fives := Gems.find_matches(five, 5)
+	_check(int(fives[0]["length"]) == 5 and Gems.kind_for_length(5) == "special", "five of a color is a special")
 
 
 func _check(ok: bool, label: String) -> void:

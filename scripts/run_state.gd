@@ -5,40 +5,18 @@ extends RefCounted
 const SAVE_PATH := "user://extract_stash.cfg"
 
 const WEAPONS := {
-	"chain": {
-		"name": "连弹",
-		"damage": 22.0,
-		"speed": 540.0,
-		"damp": 1.0,
-		"bounces": -1,
-		"life": 5.5,
-		"catch": false,
-	},
-	"return": {
-		"name": "回手",
-		"damage": 16.0,
-		"speed": 400.0,
-		"damp": 0.99,
-		"bounces": -1,
-		"life": -1.0,
-		"catch": true,
-	},
-	"hammer": {
-		"name": "重锤",
-		"damage": 48.0,
-		"speed": 250.0,
-		"damp": 0.55,
-		"bounces": 3,
-		"life": 4.0,
-		"catch": false,
-	},
+	"red": {"name": "直击", "color": "赤", "style": "hit", "damage": 18.0},
+	"blue": {"name": "贯穿", "color": "青", "style": "pierce", "damage": 14.0},
+	"green": {"name": "溅射", "color": "翠", "style": "splash", "damage": 12.0},
+	"purple": {"name": "迟滞", "color": "紫", "style": "slow", "damage": 8.0},
+	"gold": {"name": "护体", "color": "金", "style": "guard", "damage": 10.0},
 }
 
-const WEAPON_ORDER: Array[String] = ["chain", "return", "hammer"]
+const WEAPON_ORDER: Array[String] = ["red", "blue", "green", "purple", "gold"]
 
 const GEAR := {
 	"hide": {"name": "皮甲", "slot": "护甲", "desc": "挨打时少掉 2 点生命。"},
-	"ring": {"name": "铜戒", "slot": "饰品", "desc": "球的伤害 +4。"},
+	"ring": {"name": "铜戒", "slot": "饰品", "desc": "武器伤害 +4。"},
 	"jade": {"name": "玉佩", "slot": "饰品", "desc": "每个金币堆再多 2 枚。"},
 	"helm": {"name": "铁盔", "slot": "头盔", "desc": "生命上限 +12。"},
 }
@@ -47,8 +25,8 @@ const GEAR_ORDER: Array[String] = ["hide", "ring", "jade", "helm"]
 
 var rng := RandomNumberGenerator.new()
 var seed_value: int = 1
-var weapon: String = "chain"
-var owned_weapons: Array[String] = ["chain"]
+var weapon: String = "red"
+var owned_weapons: Array[String] = ["red", "blue", "green", "purple", "gold"]
 var carried: Array[String] = []
 var backpack: String = ""
 var run_gold: int = 0
@@ -76,7 +54,8 @@ const TALENTS: Array[String] = ["steady", "eye", "scar"]
 func begin_run(new_seed: int) -> void:
 	seed_value = new_seed if new_seed != 0 else 1
 	rng.seed = seed_value
-	weapon = "chain"
+	weapon = "red"
+	_ensure_weapons()
 	carried = []
 	backpack = ""
 	run_gold = 0
@@ -91,46 +70,64 @@ func begin_run(new_seed: int) -> void:
 func weapon_name(id: String = "") -> String:
 	var key := id if id != "" else weapon
 	if not WEAPONS.has(key):
-		return "连弹"
-	return str(WEAPONS[key]["name"])
+		return "直击"
+	return "%s·%s" % [str(WEAPONS[key]["color"]), str(WEAPONS[key]["name"])]
 
 
-func weapon_damage() -> float:
-	return float(WEAPONS[weapon]["damage"]) + _ring_bonus() + float(run_damage) + _stash_damage()
+func weapon_style(id: String = "") -> String:
+	var key := id if id != "" else weapon
+	if not WEAPONS.has(key):
+		return "hit"
+	return str(WEAPONS[key]["style"])
 
 
-func weapon_speed() -> float:
-	return float(WEAPONS[weapon]["speed"]) * (1.0 + float(run_rate) * 0.12)
+func weapon_damage(id: String = "") -> float:
+	var key := id if id != "" else weapon
+	var base := 18.0
+	if WEAPONS.has(key):
+		base = float(WEAPONS[key]["damage"])
+	return base + _ring_bonus() + float(run_damage) + _stash_damage()
 
 
-func weapon_damp() -> float:
-	return float(WEAPONS[weapon]["damp"])
+func weapon_id_at(color_index: int) -> String:
+	var index := clampi(color_index, 0, WEAPON_ORDER.size() - 1)
+	return WEAPON_ORDER[index]
 
 
-func weapon_bounces() -> int:
-	var bounces := int(WEAPONS[weapon]["bounces"])
-	if bounces < 0:
-		return -1
-	return bounces + run_bounce
+func set_main_from_color(color_index: int) -> void:
+	weapon = weapon_id_at(color_index)
+	if not owned_weapons.has(weapon):
+		owned_weapons.append(weapon)
 
 
-func weapon_life() -> float:
-	var life := float(WEAPONS[weapon]["life"])
-	if life > 0.0:
-		return life + float(run_bounce) * 0.8
-	return life
+func color_index() -> int:
+	var found := WEAPON_ORDER.find(weapon)
+	if found < 0:
+		return 0
+	return found
 
 
-func refire_delay() -> float:
-	return maxf(0.08, 0.5 - float(run_rate) * 0.14)
+func burst_count(color_index: int) -> int:
+	var style := weapon_style(weapon_id_at(color_index))
+	if style == "splash" or style == "guard":
+		return 3
+	return 2
 
 
-func catch_gold() -> int:
+func auto_interval() -> float:
+	return maxf(0.45, 1.25 - float(run_rate) * 0.18)
+
+
+func extra_targets() -> int:
+	return run_bounce
+
+
+func guard_amount() -> int:
 	return 8 + run_catch * 4
 
 
-func weapon_needs_catch() -> bool:
-	return bool(WEAPONS[weapon]["catch"])
+func catch_gold() -> int:
+	return guard_amount()
 
 
 func owns_weapon(id: String) -> bool:
@@ -322,11 +319,11 @@ func pick_name(id: String) -> String:
 	if id == "damage":
 		return "伤害 +4"
 	if id == "bounce":
-		return "多弹一下"
+		return "多打一个"
 	if id == "catch":
-		return "接球金币更多"
+		return "护体 +4"
 	if id == "rate":
-		return "射速加快"
+		return "射得更快"
 	return id
 
 
@@ -520,12 +517,13 @@ func load_from(path: String) -> bool:
 			stash_level.append(level)
 			stash_gem.append(gem)
 	stash_gold = int(file.get_value("stash", "gold", 0))
-	owned_weapons = ["chain"]
-	var weapon_text := str(file.get_value("stash", "weapons", "chain"))
+	owned_weapons = []
+	var weapon_text := str(file.get_value("stash", "weapons", ""))
 	for part in weapon_text.split(",", false):
 		var id := str(part)
 		if WEAPONS.has(id) and not owned_weapons.has(id):
 			owned_weapons.append(id)
+	_ensure_weapons()
 	talents = []
 	var talent_text := str(file.get_value("stash", "talents", ""))
 	if talent_text != "":
@@ -551,6 +549,17 @@ func _sync_stash() -> void:
 		stash_level.remove_at(stash_level.size() - 1)
 	while stash_gem.size() > stash.size():
 		stash_gem.remove_at(stash_gem.size() - 1)
+
+
+func _ensure_weapons() -> void:
+	var kept: Array[String] = []
+	for id in owned_weapons:
+		if WEAPONS.has(id) and not kept.has(id):
+			kept.append(id)
+	for id in WEAPON_ORDER:
+		if not kept.has(id):
+			kept.append(id)
+	owned_weapons = kept
 
 
 func _clear_run_growth() -> void:

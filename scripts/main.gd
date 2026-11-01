@@ -76,7 +76,7 @@ func _ready() -> void:
 	bag_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	side.add_child(bag_label)
 	gems = Gems.new()
-	gems.chain_cast.connect(_on_chain)
+	gems.matched.connect(_on_matched)
 	gems.visible = false
 	side.add_child(gems)
 	panel = VBoxContainer.new()
@@ -100,7 +100,7 @@ func _process(_delta: float) -> void:
 			soon = "首领在场上"
 		else:
 			soon = "距%s %d 秒" % [when, int(ceil(state.seconds_left()))]
-		hud_label.text = "区域 %d  ·  %s  ·  生命 %d  ·  %s%s" % [
+		hud_label.text = "区域 %d  ·  %s  ·  城墙 %d  ·  %s%s" % [
 			state.area,
 			state.weapon_name(),
 			int(ceil(field._hp)),
@@ -109,7 +109,9 @@ func _process(_delta: float) -> void:
 		]
 		bag_label.text = _bag_text()
 		if state.run_damage > 0 or state.run_bounce > 0 or state.run_catch > 0 or state.run_rate > 0:
-			hud_label.text += "  ·  局内 伤+%d 弹+%d 接+%d 速+%d" % [state.run_damage, state.run_bounce, state.run_catch, state.run_rate]
+			hud_label.text += "  ·  局内 伤+%d 连+%d 盾+%d 速+%d" % [state.run_damage, state.run_bounce, state.run_catch, state.run_rate]
+		if field._shield > 0.0:
+			hud_label.text += "  ·  护盾 %d" % int(ceil(field._shield))
 		if caught_note != "":
 			hud_label.text += "  ·  " + caught_note
 
@@ -143,12 +145,6 @@ func _unhandled_input(event: InputEvent) -> void:
 	elif mode == REST:
 		if key.keycode == KEY_1:
 			_secure()
-		elif key.keycode == KEY_2:
-			_take("return")
-		elif key.keycode == KEY_3:
-			_take("hammer")
-		elif key.keycode == KEY_4:
-			_take("chain")
 		elif key.keycode == KEY_E:
 			_extract()
 		elif key.keycode == KEY_ENTER:
@@ -168,9 +164,9 @@ func _show_start() -> void:
 	gems.pause()
 	panel.visible = true
 	hud_label.text = ""
-	title_label.text = "弹球搜刮"
+	title_label.text = "守城"
 	bag_label.text = _stash_line()
-	body_label.text = "左边是窄道，右边划宝石。相邻同色才能连，可以转弯，至少三颗。连上就把球打进左边。\n逆珠让球反过来，分珠多一颗球，凝珠让怪停一下。漏过扣血。经验要捡，装备直接进包。\n到点会休整，也能抽出。首领也是到点才来，打完窄道继续。\n%s\n5 升级第一件   6 镶赤珠   7 点下一个天赋   8 拆解第一件" % _stash_line()
+	body_label.text = "左边是法师，守着底下的城墙。珠子会自己蓄力射出。怪物走到城墙就会扣血，城墙归零这一局就结束。\n右边是八乘八的交换。点两颗相邻的宝石。三连打出那一色的满蓄一发，四连连射，五连是那把武器的特殊。刚消的颜色变成自动射击。\n%s\n5 升级第一件   6 镶赤珠   7 点下一个天赋   8 拆解第一件" % _stash_line()
 	_clear_panel()
 	_button("5  升级第一件", _upgrade_camp)
 	_button("6  给第一件镶赤珠", _socket_camp)
@@ -186,29 +182,30 @@ func _start_run() -> void:
 	panel.visible = false
 	field.visible = true
 	gems.visible = true
-	title_label.text = "弹球搜刮"
-	body_label.text = "左边窄道。右边划同色宝石，至少三颗，可以转弯。逆珠反球，分珠多球，凝珠停怪。"
+	title_label.text = "守城"
+	body_label.text = "左边城墙。右边交换相邻宝石。三连满蓄，四连连射，五连特殊。"
 	field.begin(state)
 	gems.open(state.seed_value)
 	_tone(520.0, 0.05)
 
 
-func _on_chain(length: int, effects: PackedStringArray) -> void:
+func _on_matched(color_index: int, length: int, kind: String, _wave: int) -> void:
 	if mode != COMBAT:
 		return
-	field.cast_chain(length, effects)
+	state.set_main_from_color(color_index)
+	field.feed(color_index, length, kind)
 	_tone(640.0, 0.04)
 
 
 func _on_lane(kind: String) -> void:
 	if kind == "boss":
-		body_label.text = "首领从上方来了。打掉它就能休整，窄道不会清掉。"
+		body_label.text = "首领从上方来了。打掉它就能休整。"
 		return
 	if mode != COMBAT and mode != PICK:
 		return
 	_show_rest()
 	if kind == "boss_down":
-		body_label.text = "首领倒了。可以抽出，也可以继续这条窄道。\n" + body_label.text
+		body_label.text = "首领倒了。可以抽出，也可以继续守城。\n" + body_label.text
 
 
 func _on_died() -> void:
@@ -274,7 +271,7 @@ func _choose(id: String) -> void:
 	panel.visible = false
 	gems.visible = true
 	gems.resume()
-	title_label.text = "弹球搜刮"
+	title_label.text = "守城"
 	body_label.text = "选了%s。这一局有效。" % state.pick_name(id)
 
 
@@ -298,9 +295,6 @@ func _show_rest() -> void:
 	]
 	_clear_panel()
 	_button("1  把身上第一件放进背包", _secure)
-	_button("2  拿起回手", func() -> void: _take("return"))
-	_button("3  拿起重锤", func() -> void: _take("hammer"))
-	_button("4  换回连弹", func() -> void: _take("chain"))
 	_button("E  抽出", _extract)
 	_button("回车  继续深入", _continue_deeper)
 
@@ -345,8 +339,8 @@ func _continue_deeper() -> void:
 	field.visible = true
 	gems.visible = true
 	gems.resume()
-	title_label.text = "弹球搜刮"
-	body_label.text = "窄道继续。右边还能接着划。"
+	title_label.text = "守城"
+	body_label.text = "城墙还在。右边接着交换。"
 	field.resume_lane()
 
 
@@ -421,7 +415,7 @@ func _bag_text() -> String:
 	lines.append("保全：%s" % secure)
 	lines.append("经验 %d/3" % state.run_xp)
 	lines.append("本局金币 %d" % state.run_gold)
-	lines.append("漏过会扣血。右边连上三颗，球打进窄道。")
+	lines.append("怪物碰到城墙会扣血。右边三连才发射。")
 	return "\n".join(lines)
 
 

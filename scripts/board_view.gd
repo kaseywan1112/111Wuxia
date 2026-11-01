@@ -31,6 +31,18 @@ var _ball: Dictionary = {}
 var _extra: Dictionary = {}
 var _extra_node: Node2D
 var _freeze := 0.0
+var _charge := 0.0
+var _shield := 0.0
+var _shots: Array = []
+var _shot_queue: Array = []
+const WALL_TOP := 512.0
+const SHOT_COLORS: Array[Color] = [
+	Color("e85d4c"),
+	Color("3d9ee0"),
+	Color("5cbf6a"),
+	Color("b07be0"),
+	Color("f0d7a2"),
+]
 var _monsters: Array = []
 var _drops: Array = []
 var _paused := false
@@ -89,6 +101,7 @@ func _ready() -> void:
 	add_child(_prompt)
 	_add_wall(Rect2(0, 0, WALL, FIELD_H))
 	_add_wall(Rect2(FIELD_W - WALL, 0, WALL, FIELD_H))
+	_add_wall(Rect2(0, WALL_TOP, FIELD_W, FIELD_H - WALL_TOP))
 	for i in 6:
 		var lane := ColorRect.new()
 		lane.color = Color(0.45, 0.55, 0.68, 0.28)
@@ -120,10 +133,15 @@ func begin(run_state: Rules) -> void:
 	_clear_actors()
 	_hp_max = 72.0 + float(state.bonus_hp())
 	_hp = _hp_max
-	_player = Vector2(FIELD_W * 0.5, FIELD_H - 70.0)
+	_shield = 0.0
+	_charge = 0.15
+	_shots = []
+	_shot_queue = []
+	_player = Vector2(FIELD_W * 0.5, WALL_TOP - 28.0)
 	_spawn_monster(false, Vector2(FIELD_W * 0.38, 70.0))
 	_spawn_monster(false, Vector2(FIELD_W * 0.66, 150.0))
-	_prompt.text = "右边连上三颗，球就打进来。"
+	_prompt.text = "珠子在蓄力。右边交换同色宝石。"
+	_draw_charge()
 
 
 func stop() -> void:
@@ -162,159 +180,235 @@ func _process(delta: float) -> void:
 		_prompt.text = "首领从上方来了。"
 		lane_event.emit("boss")
 	_scroll_lanes(delta)
-	_move_player(delta)
+	_player = Vector2(FIELD_W * 0.5, WALL_TOP - 28.0)
+	_draw_player()
+	_charge_marble(delta)
+	_drain_queue(delta)
+	_move_shots(delta)
 	_move_monsters(delta)
 	_spawn_more(delta)
-	_move_ball(delta)
-	_move_extra(delta)
 	_scroll_drops(delta)
 	_collect()
 
 
-func _unhandled_input(event: InputEvent) -> void:
-	if not running or not accept_input or state == null:
-		return
-	if event is InputEventMouseButton:
-		var mouse := event as InputEventMouseButton
-		if mouse.pressed and mouse.button_index == MOUSE_BUTTON_LEFT:
-			_try_shoot()
-			get_viewport().set_input_as_handled()
-		return
-	if not (event is InputEventKey):
-		return
-	var key := event as InputEventKey
-	if not key.pressed or key.echo:
-		return
-	if key.keycode == KEY_SPACE:
-		_try_shoot()
-		get_viewport().set_input_as_handled()
+func _unhandled_input(_event: InputEvent) -> void:
+	return
 
 
-func _try_shoot() -> void:
-	if _paused or _refire > 0.0 or not _ball.is_empty():
-		return
-	_launch_ball()
-
-
-func _launch_ball() -> void:
-	var speed := state.weapon_speed()
-	var aim := _aim_angle()
-	var vel := Vector2(sin(aim), -cos(aim)) * speed
-	_ball = {
-		"pos": _player + Vector2(0, -56),
-		"vel": vel,
-		"life": state.weapon_life(),
-		"bounces": state.weapon_bounces(),
-		"damp": state.weapon_damp(),
-		"catch": state.weapon_needs_catch(),
-		"heavy": state.weapon == "hammer",
-		"arm": 0.35,
-	}
-	_ball_node.visible = true
-	_ball_node.position = _ball["pos"]
-	_trail.clear_points()
-	var tint := _ball_node.get_child(0) as Polygon2D
-	if state.weapon == "hammer":
-		tint.color = Color("e07a3a")
-		tint.scale = Vector2(1.7, 1.7)
-	elif state.weapon == "return":
-		tint.color = Color("f0d7a2")
-		tint.scale = Vector2.ONE
-	else:
-		tint.color = Color("f7f4ee")
-		tint.scale = Vector2.ONE
-
-
-func cast_chain(length: int, effects: PackedStringArray) -> void:
+func feed(color_index: int, length: int, kind: String) -> void:
 	if not running or _paused or state == null:
 		return
-	if _ball.is_empty():
-		_launch_ball()
-	var bits := PackedStringArray()
-	bits.append("连成%d" % length)
-	if effects.has("reverse"):
-		_flip_velocity(_ball)
-		_flip_velocity(_extra)
-		bits.append("反过来")
-	if effects.has("split"):
-		_spawn_extra()
-		bits.append("分出一球")
-	if effects.has("freeze"):
-		_freeze = 1.5
-		bits.append("怪停住")
-	var text := " ".join(bits)
-	_prompt.text = text
-	_popup(_player + Vector2(0, -28), text, Color("f0d7a2"))
-
-
-func _flip_velocity(ball: Dictionary) -> void:
-	if ball.is_empty():
+	var id := state.weapon_id_at(color_index)
+	var name := state.weapon_name(id)
+	if kind == "special" or length >= 5:
+		_prompt.text = "%s · 特殊" % name
+		_popup(_player, _prompt.text, SHOT_COLORS[color_index])
+		_spawn_marble(color_index, "special")
 		return
-	ball["vel"] = -Vector2(ball["vel"])
+	var times := 1
+	if kind == "burst" or length >= 4:
+		times = state.burst_count(color_index)
+		_prompt.text = "%s ×%d" % [name, times]
+	else:
+		_prompt.text = "%s · 满蓄" % name
+	_popup(_player, _prompt.text, SHOT_COLORS[color_index])
+	for i in times:
+		_shot_queue.append({"t": float(i) * 0.18, "color": color_index, "mode": "full"})
 
 
-func _spawn_extra() -> void:
-	if _ball.is_empty():
+func _charge_marble(delta: float) -> void:
+	_charge += delta / state.auto_interval()
+	_draw_charge()
+	if _charge < 1.0:
 		return
-	var vel: Vector2 = _ball["vel"]
-	if vel.length() < 10.0:
-		vel = Vector2(0, -1) * state.weapon_speed()
-	_extra = {
-		"pos": Vector2(_ball["pos"]),
-		"vel": vel.rotated(0.65),
-		"life": 3.2,
-	}
-	_extra_node.visible = true
-	_extra_node.position = _extra["pos"]
+	_charge = 0.0
+	_spawn_marble(state.color_index(), "full")
+	_prompt.text = "%s · 蓄满射出" % state.weapon_name()
 
 
-func _aim_angle() -> float:
-	var mouse := get_local_mouse_position()
-	var dx := mouse.x - _player.x
-	var dy := _player.y - mouse.y
-	if dy < 24.0:
-		dy = 24.0
-	return clampf(atan2(dx, dy), -1.05, 1.05)
+func _draw_charge() -> void:
+	if _ball_node == null:
+		return
+	_ball_node.visible = true
+	_ball_node.position = _player + Vector2(0, -20)
+	var tint := _ball_node.get_child(0) as Polygon2D
+	if tint != null:
+		var index := state.color_index() if state != null else 0
+		tint.color = SHOT_COLORS[index]
+		tint.scale = Vector2.ONE * (0.35 + clampf(_charge, 0.0, 1.0) * 0.9)
 
 
-func _move_player(delta: float) -> void:
-	var dir := Vector2.ZERO
-	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
-		dir.x -= 1.0
-	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
-		dir.x += 1.0
-	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
-		dir.y -= 1.0
-	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
-		dir.y += 1.0
-	if dir.length() > 0.0:
-		dir = dir.normalized()
-	_player += dir * 250.0 * delta
-	_player.x = clampf(_player.x, WALL + PLAYER_R, FIELD_W - WALL - PLAYER_R)
-	_player.y = clampf(_player.y, 10.0 + PLAYER_R, FIELD_H - 10.0 - PLAYER_R)
-	_player_node.position = _player
+func _drain_queue(delta: float) -> void:
+	var kept: Array = []
+	for item in _shot_queue:
+		item["t"] = float(item["t"]) - delta
+		if float(item["t"]) <= 0.0:
+			_spawn_marble(int(item["color"]), str(item["mode"]))
+		else:
+			kept.append(item)
+	_shot_queue = kept
+
+
+func _spawn_marble(color_index: int, mode: String) -> void:
+	var id := state.weapon_id_at(color_index)
+	var style := state.weapon_style(id)
+	if mode == "special":
+		_cast_special(color_index, style)
+		return
+	if style == "guard":
+		_heal_wall(float(state.guard_amount()))
+		return
+	var hits := 1
+	if style == "pierce" or style == "slow":
+		hits = 8
+	var node := _make_shot(color_index, 1.0)
+	_shots.append({
+		"pos": _player + Vector2(0, -24),
+		"vel": Vector2(0, -460),
+		"style": style,
+		"hits": hits,
+		"power": 1.0,
+		"amount": state.weapon_damage(id),
+		"color": color_index,
+		"seen": {},
+		"node": node,
+	})
+
+
+func _cast_special(color_index: int, style: String) -> void:
+	var amount := state.weapon_damage(state.weapon_id_at(color_index))
+	if style == "hit":
+		var node := _make_shot(color_index, 1.7)
+		_shots.append({
+			"pos": _player + Vector2(0, -24),
+			"vel": Vector2(0, -420),
+			"style": "hit",
+			"hits": 1,
+			"power": 3.0,
+			"amount": amount,
+			"color": color_index,
+			"seen": {},
+			"node": node,
+		})
+	elif style == "pierce" or style == "splash":
+		_damage_all(amount * 1.3, "全中")
+	elif style == "slow":
+		for monster in _monsters:
+			monster["slow"] = 3.2
+		_popup(_player, "全场迟滞", SHOT_COLORS[color_index])
+	else:
+		_heal_wall(float(state.guard_amount()) * 2.0)
+		_shield += float(state.guard_amount())
+		_popup(_player, "大盾 +%d" % state.guard_amount(), SHOT_COLORS[color_index])
+
+
+func _heal_wall(amount: float) -> void:
+	_hp = minf(_hp + amount, _hp_max)
+	_popup(Vector2(FIELD_W * 0.5, WALL_TOP - 8.0), "城墙 +%d" % int(amount), Color("9be7a8"))
+
+
+func _damage_all(amount: float, text: String) -> void:
+	var victims: Array = []
+	for monster in _monsters:
+		victims.append(monster)
+	for monster in victims:
+		_damage_monster(monster, amount, text)
+
+
+func _make_shot(color_index: int, scale: float) -> Node2D:
+	var node := Node2D.new()
+	node.z_index = 7
+	var body := Polygon2D.new()
+	body.polygon = _circle(BALL_R * scale, 10)
+	body.color = SHOT_COLORS[color_index]
+	node.add_child(body)
+	node.position = _player + Vector2(0, -24)
+	add_child(node)
+	return node
+
+
+func _move_shots(delta: float) -> void:
+	var kept: Array = []
+	for shot in _shots:
+		var pos: Vector2 = shot["pos"]
+		var vel: Vector2 = shot["vel"]
+		var nxt := pos + vel * delta
+		var alive := true
+		for monster in _monsters:
+			var id := int(monster["id"])
+			if shot["seen"].has(id):
+				continue
+			if nxt.distance_to(monster["pos"]) > float(monster["r"]) + BALL_R + 6.0:
+				continue
+			shot["seen"][id] = true
+			var style := str(shot["style"])
+			var amount := float(shot["amount"]) * float(shot["power"])
+			if style == "slow":
+				monster["slow"] = 2.2
+				_damage_monster(monster, amount * 0.5, "慢")
+			elif style == "splash":
+				_damage_monster(monster, amount, str(int(amount)))
+				_splash_around(monster, amount * 0.7)
+				alive = false
+				break
+			else:
+				_damage_monster(monster, amount, str(int(amount)))
+			shot["hits"] = int(shot["hits"]) - 1
+			if style == "hit" or int(shot["hits"]) <= 0:
+				alive = false
+				break
+		if nxt.y < -20.0:
+			alive = false
+		shot["pos"] = nxt
+		var node: Node2D = shot["node"]
+		if is_instance_valid(node):
+			node.position = nxt
+			if not alive:
+				node.queue_free()
+		if alive:
+			kept.append(shot)
+	_shots = kept
+
+
+func _splash_around(origin: Dictionary, amount: float) -> void:
+	var victims: Array = []
+	for monster in _monsters:
+		if monster == origin:
+			continue
+		if monster["pos"].distance_to(origin["pos"]) <= 78.0:
+			victims.append(monster)
+	for monster in victims:
+		_damage_monster(monster, amount, "溅")
+
+
+func _damage_monster(monster: Dictionary, amount: float, text: String) -> void:
+	if not _monsters.has(monster):
+		return
+	monster["hp"] = float(monster["hp"]) - amount
+	monster["hit_cd"] = 0.12
+	_popup(monster["pos"], text, Color("f0d7a2"))
+	_refresh_bar(monster)
+	if float(monster["hp"]) > 0.0:
+		return
+	_kill_monster(monster)
 
 
 func _move_monsters(delta: float) -> void:
-	if _freeze > 0.0:
-		_freeze = maxf(_freeze - delta, 0.0)
-		for monster in _monsters:
-			monster["hit_cd"] = maxf(float(monster["hit_cd"]) - delta, 0.0)
-			var node: Node2D = monster["node"]
-			if is_instance_valid(node):
-				node.modulate = Color(0.62, 0.9, 1.0)
-		return
-	var leaked: Array = []
+	var reached: Array = []
 	for monster in _monsters:
 		var pos: Vector2 = monster["pos"]
 		var vel: Vector2 = monster["vel"]
 		vel.x = clampf(vel.x + randf_range(-40.0, 40.0) * delta, -50.0, 50.0)
 		vel.y = clampf(vel.y + randf_range(-20.0, 20.0) * delta, -16.0, 24.0)
+		var slow := float(monster.get("slow", 0.0))
+		if slow > 0.0:
+			monster["slow"] = maxf(slow - delta, 0.0)
+		var pace := 0.4 if slow > 0.0 else 1.0
 		var drift := _scroll_speed
 		if bool(monster["boss"]):
-			drift *= 0.35
-		pos += vel * delta
-		pos.y += drift * delta
+			drift *= 0.45
+		pos.x += vel.x * delta * pace
+		pos.y += drift * delta * pace
 		var radius := float(monster["r"])
 		if pos.x < WALL + radius:
 			pos.x = WALL + radius
@@ -328,227 +422,11 @@ func _move_monsters(delta: float) -> void:
 		var node: Node2D = monster["node"]
 		if is_instance_valid(node):
 			node.position = pos
-			node.modulate = Color.WHITE
-		if pos.y > _player.y + 6.0:
-			leaked.append(monster)
-	for monster in leaked:
+			node.modulate = Color(0.72, 0.7, 1.0) if slow > 0.0 else Color.WHITE
+		if pos.y > WALL_TOP - float(monster["r"]):
+			reached.append(monster)
+	for monster in reached:
 		_monster_passed(monster)
-
-
-func _touch_player(delta: float) -> void:
-	_grace = maxf(_grace - delta, 0.0)
-	_hurt_cd = maxf(_hurt_cd - delta, 0.0)
-	if _grace > 0.0 or _hurt_cd > 0.0:
-		return
-	for monster in _monsters:
-		var pos: Vector2 = monster["pos"]
-		if pos.distance_to(_player) > float(monster["r"]) + PLAYER_R:
-			continue
-		var damage := 10.0
-		if bool(monster["boss"]):
-			damage = 16.0
-		damage = maxf(damage - float(state.armor_reduction()), 4.0)
-		_hp -= damage
-		_hurt_cd = 0.55
-		_popup(_player, "-%d" % int(damage), Color("e07a72"))
-		if _hp <= 0.0:
-			_hp = 0.0
-			running = false
-			accept_input = false
-			died.emit()
-		return
-
-
-func _move_ball(delta: float) -> void:
-	if _ball.is_empty():
-		_ball_node.visible = false
-		return
-	var left := delta
-	var guard := 0
-	while left > 0.0 and not _ball.is_empty() and guard < 24:
-		guard += 1
-		var vel_now: Vector2 = _ball["vel"]
-		var speed := maxf(vel_now.length(), 1.0)
-		var step := minf(left, 6.0 / speed)
-		if not _step_ball(step):
-			return
-		left -= step
-	if _ball.is_empty():
-		return
-	var pos: Vector2 = _ball["pos"]
-	_ball_node.visible = true
-	_ball_node.position = pos
-	_ball_node.rotation = Vector2(_ball["vel"]).angle() + PI / 2.0
-	if _trail.get_point_count() == 0 or _trail.get_point_position(_trail.get_point_count() - 1).distance_to(pos) > 16.0:
-		_trail.add_point(pos)
-	if _trail.get_point_count() > 14:
-		_trail.remove_point(0)
-
-
-func _move_extra(delta: float) -> void:
-	if _extra.is_empty():
-		if _extra_node != null:
-			_extra_node.visible = false
-		return
-	var left := delta
-	var guard := 0
-	while left > 0.0 and not _extra.is_empty() and guard < 16:
-		guard += 1
-		var vel_now: Vector2 = _extra["vel"]
-		var speed := maxf(vel_now.length(), 1.0)
-		var step := minf(left, 6.0 / speed)
-		if not _step_extra(step):
-			return
-		left -= step
-	if _extra.is_empty():
-		return
-	_extra["life"] = float(_extra["life"]) - delta
-	if float(_extra["life"]) <= 0.0:
-		_drop_extra()
-		return
-	_extra_node.visible = true
-	_extra_node.position = _extra["pos"]
-
-
-func _step_extra(delta: float) -> bool:
-	var pos: Vector2 = _extra["pos"]
-	var vel: Vector2 = _extra["vel"]
-	var nxt := pos + vel * delta
-	if nxt.x < WALL + BALL_R:
-		nxt.x = WALL + BALL_R
-		vel.x = absf(vel.x)
-	elif nxt.x > FIELD_W - WALL - BALL_R:
-		nxt.x = FIELD_W - WALL - BALL_R
-		vel.x = -absf(vel.x)
-	if nxt.y < 6.0 + BALL_R:
-		nxt.y = 6.0 + BALL_R
-		vel.y = absf(vel.y)
-	elif nxt.y > FIELD_H - 6.0 - BALL_R:
-		nxt.y = FIELD_H - 6.0 - BALL_R
-		vel.y = -absf(vel.y)
-	var hit := _monster_hit_sweep(pos, nxt)
-	if not hit.is_empty():
-		var at: Vector2 = hit["pos"]
-		var touch: Vector2 = hit["hit_at"]
-		var normal := touch - at
-		if normal.length() < 1.0:
-			normal = Vector2.UP
-		normal = normal.normalized()
-		vel = normal * maxf(vel.length(), 80.0)
-		nxt = at + normal * (float(hit["r"]) + BALL_R + 2.0)
-		_hurt_monster(hit)
-	_extra["pos"] = nxt
-	_extra["vel"] = vel
-	return true
-
-
-func _drop_extra() -> void:
-	_extra = {}
-	if _extra_node != null:
-		_extra_node.visible = false
-
-
-func _step_ball(delta: float) -> bool:
-	var pos: Vector2 = _ball["pos"]
-	var vel: Vector2 = _ball["vel"]
-	var nxt := pos + vel * delta
-	var damp := float(_ball["damp"])
-	var bounced := false
-	if nxt.x < WALL + BALL_R:
-		nxt.x = WALL + BALL_R
-		vel.x = absf(vel.x) * damp
-		bounced = true
-	elif nxt.x > FIELD_W - WALL - BALL_R:
-		nxt.x = FIELD_W - WALL - BALL_R
-		vel.x = -absf(vel.x) * damp
-		bounced = true
-	if nxt.y < 6.0 + BALL_R:
-		nxt.y = 6.0 + BALL_R
-		vel.y = absf(vel.y) * damp
-		bounced = true
-	elif nxt.y > FIELD_H - 6.0 - BALL_R:
-		nxt.y = FIELD_H - 6.0 - BALL_R
-		vel.y = -absf(vel.y) * damp
-		bounced = true
-	if bounced:
-		vel = vel.rotated(randf_range(-0.22, 0.22))
-		if int(_ball["bounces"]) >= 0:
-			_ball["bounces"] = int(_ball["bounces"]) - 1
-	var hit := _monster_hit_sweep(pos, nxt)
-	if not hit.is_empty():
-		var at: Vector2 = hit["pos"]
-		var touch: Vector2 = hit["hit_at"]
-		var normal := touch - at
-		if normal.length() < 1.0:
-			normal = Vector2.UP
-		normal = normal.normalized()
-		var speed := maxf(vel.length(), 80.0)
-		vel = normal * speed * damp
-		nxt = at + normal * (float(hit["r"]) + BALL_R + 2.0)
-		_hurt_monster(hit)
-		if _ball.is_empty():
-			return false
-		if bool(_ball["heavy"]):
-			_ball["bounces"] = int(_ball["bounces"]) - 1
-	_ball["arm"] = maxf(float(_ball["arm"]) - delta, 0.0)
-	if bool(_ball["catch"]) and float(_ball["arm"]) <= 0.0 and nxt.distance_to(_player) < PLAYER_R + BALL_R + 18.0:
-		_catch()
-		return false
-	if not bool(_ball["heavy"]) and vel.length() < state.weapon_speed() * 0.72:
-		vel = vel.normalized() * state.weapon_speed() * 0.85
-	_ball["pos"] = nxt
-	_ball["vel"] = vel
-	if state.weapon_life() > 0.0:
-		_ball["life"] = float(_ball["life"]) - delta
-	if state.weapon_life() > 0.0 and float(_ball["life"]) <= 0.0:
-		_drop_ball()
-		return false
-	if int(_ball["bounces"]) < 0 and state.weapon_bounces() >= 0:
-		_drop_ball()
-		return false
-	if bool(_ball["heavy"]) and vel.length() < 90.0:
-		_drop_ball()
-		return false
-	return true
-
-
-func _monster_hit_sweep(a: Vector2, b: Vector2) -> Dictionary:
-	var best: Dictionary = {}
-	var best_d := 9999.0
-	for monster in _monsters:
-		if float(monster["hit_cd"]) > 0.0:
-			continue
-		var at: Vector2 = monster["pos"]
-		var touch := _closest_on_segment(a, b, at)
-		var dist := touch.distance_to(at)
-		var limit := float(monster["r"]) + BALL_R + 8.0
-		if dist <= limit and dist < best_d:
-			best_d = dist
-			best = monster
-			best["hit_at"] = touch
-	return best
-
-
-func _closest_on_segment(a: Vector2, b: Vector2, point: Vector2) -> Vector2:
-	var span := b - a
-	var length_sq := span.length_squared()
-	if length_sq < 0.001:
-		return b
-	var t := clampf((point - a).dot(span) / length_sq, 0.0, 1.0)
-	return a + span * t
-
-
-func _hurt_monster(monster: Dictionary) -> void:
-	var amount := state.weapon_damage()
-	if _buff > 0.0:
-		amount *= 1.5
-	monster["hp"] = float(monster["hp"]) - amount
-	monster["hit_cd"] = 0.16
-	_popup(monster["pos"], str(int(round(amount))), Color("f0d7a2"))
-	_refresh_bar(monster)
-	if float(monster["hp"]) > 0.0:
-		return
-	_kill_monster(monster)
 
 
 func _kill_monster(monster: Dictionary) -> void:
@@ -571,38 +449,19 @@ func _kill_monster(monster: Dictionary) -> void:
 		_pause_for_event("boss_down")
 
 
-func _catch() -> void:
-	var bonus := state.catch_gold()
-	_drop_ball()
-	state.pickup_gold(bonus)
-	_buff = 4.0
-	_popup(_player + Vector2(0, -24), "接住了 +%d" % bonus, Color("f0d7a2"))
-	looted.emit("gold")
-	caught_ball.emit()
-
-
 func resume_after_pick() -> void:
 	pending_picks = []
 	_paused = false
 	if running:
 		accept_input = true
-		_prompt.text = "窄道还在往上卷。"
+		_prompt.text = "接着守城。"
 
 
 func resume_lane() -> void:
 	_paused = false
 	if running:
 		accept_input = true
-		_prompt.text = "窄道还在往上卷。"
-
-
-func _drop_ball() -> void:
-	if not _ball.is_empty() and state != null:
-		_refire = state.refire_delay()
-	_ball = {}
-	_ball_node.visible = false
-	if _trail != null:
-		_trail.clear_points()
+		_prompt.text = "接着守城。"
 
 
 func _scroll_lanes(delta: float) -> void:
@@ -637,8 +496,12 @@ func _monster_passed(monster: Dictionary) -> void:
 	var boss := bool(monster["boss"])
 	var damage := float(state.pass_damage(boss) - state.armor_reduction())
 	damage = maxf(damage, 4.0)
+	if _shield > 0.0:
+		var used := minf(_shield, damage)
+		_shield -= used
+		damage -= used
 	_hp -= damage
-	_popup(_player, "漏过 -%d" % int(damage), Color("e07a72"))
+	_popup(Vector2(FIELD_W * 0.5, WALL_TOP - 8.0), "城墙 -%d" % int(ceil(damage)), Color("e07a72"))
 	var node: Node = monster["node"]
 	if is_instance_valid(node):
 		node.queue_free()
@@ -769,9 +632,13 @@ func _clear_actors() -> void:
 			node.queue_free()
 	_monsters.clear()
 	_drops.clear()
-	_drop_ball()
-	_drop_extra()
+	_ball = {}
+	_extra = {}
+	if _extra_node != null:
+		_extra_node.visible = false
 	_freeze = 0.0
+	if _trail != null:
+		_trail.clear_points()
 
 
 func _build_player() -> void:
