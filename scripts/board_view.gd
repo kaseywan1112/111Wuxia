@@ -28,6 +28,9 @@ var _grace := 0.0
 var _buff := 0.0
 var _trail: Line2D
 var _ball: Dictionary = {}
+var _extra: Dictionary = {}
+var _extra_node: Node2D
+var _freeze := 0.0
 var _monsters: Array = []
 var _drops: Array = []
 var _paused := false
@@ -70,6 +73,14 @@ func _ready() -> void:
 	ball_body.polygon = _circle(BALL_R, 10)
 	ball_body.color = Color("f4f1ea")
 	_ball_node.add_child(ball_body)
+	_extra_node = Node2D.new()
+	_extra_node.z_index = 7
+	_extra_node.visible = false
+	add_child(_extra_node)
+	var extra_body := Polygon2D.new()
+	extra_body.polygon = _circle(BALL_R, 10)
+	extra_body.color = Color("ffb15a")
+	_extra_node.add_child(extra_body)
 	_prompt = Label.new()
 	_prompt.position = Vector2(28, 16)
 	_prompt.add_theme_font_size_override("font_size", 18)
@@ -101,6 +112,10 @@ func begin(run_state: Rules) -> void:
 	_scroll_speed = 46.0 + float(state.area - 1) * 8.0
 	_spawn_wait = 2.2
 	_refire = 0.0
+	_freeze = 0.0
+	_extra = {}
+	if _extra_node != null:
+		_extra_node.visible = false
 	pending_picks = []
 	_clear_actors()
 	_hp_max = 72.0 + float(state.bonus_hp())
@@ -108,7 +123,7 @@ func begin(run_state: Rules) -> void:
 	_player = Vector2(FIELD_W * 0.5, FIELD_H - 70.0)
 	_spawn_monster(false, Vector2(FIELD_W * 0.38, 70.0))
 	_spawn_monster(false, Vector2(FIELD_W * 0.66, 150.0))
-	_prompt.text = "窄道往上卷。漏下去会扣血。经验要走过去捡。"
+	_prompt.text = "右边连上三颗，球就打进来。"
 
 
 func stop() -> void:
@@ -151,6 +166,7 @@ func _process(delta: float) -> void:
 	_move_monsters(delta)
 	_spawn_more(delta)
 	_move_ball(delta)
+	_move_extra(delta)
 	_scroll_drops(delta)
 	_collect()
 
@@ -177,6 +193,10 @@ func _unhandled_input(event: InputEvent) -> void:
 func _try_shoot() -> void:
 	if _paused or _refire > 0.0 or not _ball.is_empty():
 		return
+	_launch_ball()
+
+
+func _launch_ball() -> void:
 	var speed := state.weapon_speed()
 	var aim := _aim_angle()
 	var vel := Vector2(sin(aim), -cos(aim)) * speed
@@ -203,6 +223,49 @@ func _try_shoot() -> void:
 	else:
 		tint.color = Color("f7f4ee")
 		tint.scale = Vector2.ONE
+
+
+func cast_chain(length: int, effects: PackedStringArray) -> void:
+	if not running or _paused or state == null:
+		return
+	if _ball.is_empty():
+		_launch_ball()
+	var bits := PackedStringArray()
+	bits.append("连成%d" % length)
+	if effects.has("reverse"):
+		_flip_velocity(_ball)
+		_flip_velocity(_extra)
+		bits.append("反过来")
+	if effects.has("split"):
+		_spawn_extra()
+		bits.append("分出一球")
+	if effects.has("freeze"):
+		_freeze = 1.5
+		bits.append("怪停住")
+	var text := " ".join(bits)
+	_prompt.text = text
+	_popup(_player + Vector2(0, -28), text, Color("f0d7a2"))
+
+
+func _flip_velocity(ball: Dictionary) -> void:
+	if ball.is_empty():
+		return
+	ball["vel"] = -Vector2(ball["vel"])
+
+
+func _spawn_extra() -> void:
+	if _ball.is_empty():
+		return
+	var vel: Vector2 = _ball["vel"]
+	if vel.length() < 10.0:
+		vel = Vector2(0, -1) * state.weapon_speed()
+	_extra = {
+		"pos": Vector2(_ball["pos"]),
+		"vel": vel.rotated(0.65),
+		"life": 3.2,
+	}
+	_extra_node.visible = true
+	_extra_node.position = _extra["pos"]
 
 
 func _aim_angle() -> float:
@@ -233,6 +296,14 @@ func _move_player(delta: float) -> void:
 
 
 func _move_monsters(delta: float) -> void:
+	if _freeze > 0.0:
+		_freeze = maxf(_freeze - delta, 0.0)
+		for monster in _monsters:
+			monster["hit_cd"] = maxf(float(monster["hit_cd"]) - delta, 0.0)
+			var node: Node2D = monster["node"]
+			if is_instance_valid(node):
+				node.modulate = Color(0.62, 0.9, 1.0)
+		return
 	var leaked: Array = []
 	for monster in _monsters:
 		var pos: Vector2 = monster["pos"]
@@ -257,6 +328,7 @@ func _move_monsters(delta: float) -> void:
 		var node: Node2D = monster["node"]
 		if is_instance_valid(node):
 			node.position = pos
+			node.modulate = Color.WHITE
 		if pos.y > _player.y + 6.0:
 			leaked.append(monster)
 	for monster in leaked:
@@ -311,6 +383,69 @@ func _move_ball(delta: float) -> void:
 		_trail.add_point(pos)
 	if _trail.get_point_count() > 14:
 		_trail.remove_point(0)
+
+
+func _move_extra(delta: float) -> void:
+	if _extra.is_empty():
+		if _extra_node != null:
+			_extra_node.visible = false
+		return
+	var left := delta
+	var guard := 0
+	while left > 0.0 and not _extra.is_empty() and guard < 16:
+		guard += 1
+		var vel_now: Vector2 = _extra["vel"]
+		var speed := maxf(vel_now.length(), 1.0)
+		var step := minf(left, 6.0 / speed)
+		if not _step_extra(step):
+			return
+		left -= step
+	if _extra.is_empty():
+		return
+	_extra["life"] = float(_extra["life"]) - delta
+	if float(_extra["life"]) <= 0.0:
+		_drop_extra()
+		return
+	_extra_node.visible = true
+	_extra_node.position = _extra["pos"]
+
+
+func _step_extra(delta: float) -> bool:
+	var pos: Vector2 = _extra["pos"]
+	var vel: Vector2 = _extra["vel"]
+	var nxt := pos + vel * delta
+	if nxt.x < WALL + BALL_R:
+		nxt.x = WALL + BALL_R
+		vel.x = absf(vel.x)
+	elif nxt.x > FIELD_W - WALL - BALL_R:
+		nxt.x = FIELD_W - WALL - BALL_R
+		vel.x = -absf(vel.x)
+	if nxt.y < 6.0 + BALL_R:
+		nxt.y = 6.0 + BALL_R
+		vel.y = absf(vel.y)
+	elif nxt.y > FIELD_H - 6.0 - BALL_R:
+		nxt.y = FIELD_H - 6.0 - BALL_R
+		vel.y = -absf(vel.y)
+	var hit := _monster_hit_sweep(pos, nxt)
+	if not hit.is_empty():
+		var at: Vector2 = hit["pos"]
+		var touch: Vector2 = hit["hit_at"]
+		var normal := touch - at
+		if normal.length() < 1.0:
+			normal = Vector2.UP
+		normal = normal.normalized()
+		vel = normal * maxf(vel.length(), 80.0)
+		nxt = at + normal * (float(hit["r"]) + BALL_R + 2.0)
+		_hurt_monster(hit)
+	_extra["pos"] = nxt
+	_extra["vel"] = vel
+	return true
+
+
+func _drop_extra() -> void:
+	_extra = {}
+	if _extra_node != null:
+		_extra_node.visible = false
 
 
 func _step_ball(delta: float) -> bool:
@@ -635,6 +770,8 @@ func _clear_actors() -> void:
 	_monsters.clear()
 	_drops.clear()
 	_drop_ball()
+	_drop_extra()
+	_freeze = 0.0
 
 
 func _build_player() -> void:

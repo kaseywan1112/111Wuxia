@@ -2,6 +2,7 @@ extends Control
 
 const Rules = preload("res://scripts/run_state.gd")
 const Field = preload("res://scripts/board_view.gd")
+const Gems = preload("res://scripts/gem_board.gd")
 
 const START := "start"
 const COMBAT := "combat"
@@ -15,6 +16,7 @@ var result_kind: String = ""
 var result_lines: PackedStringArray = PackedStringArray()
 var caught_note: String = ""
 var field: Field
+var gems: Gems
 var title_label: Label
 var body_label: Label
 var hud_label: Label
@@ -73,6 +75,10 @@ func _ready() -> void:
 	bag_label = _label("", 16)
 	bag_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	side.add_child(bag_label)
+	gems = Gems.new()
+	gems.chain_cast.connect(_on_chain)
+	gems.visible = false
+	side.add_child(gems)
 	panel = VBoxContainer.new()
 	panel.add_theme_constant_override("separation", 8)
 	side.add_child(panel)
@@ -158,11 +164,13 @@ func _show_start() -> void:
 	caught_note = ""
 	field.visible = false
 	field.stop()
+	gems.visible = false
+	gems.pause()
 	panel.visible = true
 	hud_label.text = ""
 	title_label.text = "弹球搜刮"
 	bag_label.text = _stash_line()
-	body_label.text = "窄道一直往上卷，不会清场。开头怪很少，后面一直从顶上补。漏过你身边会扣血，扣光这一局就结束。经验球要走过去捡，装备直接进右边的背包。\n到点会休整，也能抽出。首领也是到点才来，打完窄道继续。保全背包仍然只能放一件。\n%s\n5 升级第一件   6 镶赤珠   7 点下一个天赋   8 拆解第一件" % _stash_line()
+	body_label.text = "左边是窄道，右边划宝石。相邻同色才能连，可以转弯，至少三颗。连上就把球打进左边。\n逆珠让球反过来，分珠多一颗球，凝珠让怪停一下。漏过扣血。经验要捡，装备直接进包。\n到点会休整，也能抽出。首领也是到点才来，打完窄道继续。\n%s\n5 升级第一件   6 镶赤珠   7 点下一个天赋   8 拆解第一件" % _stash_line()
 	_clear_panel()
 	_button("5  升级第一件", _upgrade_camp)
 	_button("6  给第一件镶赤珠", _socket_camp)
@@ -177,10 +185,19 @@ func _start_run() -> void:
 	caught_note = ""
 	panel.visible = false
 	field.visible = true
+	gems.visible = true
 	title_label.text = "弹球搜刮"
-	body_label.text = "左边是窄道。右边是背包。漏过扣血，经验要捡，装备直接进包。"
+	body_label.text = "左边窄道。右边划同色宝石，至少三颗，可以转弯。逆珠反球，分珠多球，凝珠停怪。"
 	field.begin(state)
+	gems.open(state.seed_value)
 	_tone(520.0, 0.05)
+
+
+func _on_chain(length: int, effects: PackedStringArray) -> void:
+	if mode != COMBAT:
+		return
+	field.cast_chain(length, effects)
+	_tone(640.0, 0.04)
 
 
 func _on_lane(kind: String) -> void:
@@ -232,6 +249,8 @@ func _on_pick() -> void:
 		return
 	mode = PICK
 	panel.visible = true
+	gems.visible = false
+	gems.pause()
 	title_label.text = "击杀之后"
 	body_label.text = "选一个。只在这一局里有效，倒下就丢掉。"
 	_clear_panel()
@@ -253,6 +272,8 @@ func _choose(id: String) -> void:
 	field.resume_after_pick()
 	mode = COMBAT
 	panel.visible = false
+	gems.visible = true
+	gems.resume()
 	title_label.text = "弹球搜刮"
 	body_label.text = "选了%s。这一局有效。" % state.pick_name(id)
 
@@ -260,6 +281,8 @@ func _choose(id: String) -> void:
 func _show_rest() -> void:
 	mode = REST
 	field.visible = true
+	gems.visible = false
+	gems.pause()
 	panel.visible = true
 	hud_label.text = "区域 %d" % state.area
 	bag_label.text = _bag_text()
@@ -320,8 +343,10 @@ func _continue_deeper() -> void:
 	mode = COMBAT
 	panel.visible = false
 	field.visible = true
+	gems.visible = true
+	gems.resume()
 	title_label.text = "弹球搜刮"
-	body_label.text = "窄道继续。怪还会从顶上出来。"
+	body_label.text = "窄道继续。右边还能接着划。"
 	field.resume_lane()
 
 
@@ -329,6 +354,8 @@ func _show_result() -> void:
 	mode = RESULT
 	field.visible = false
 	field.stop()
+	gems.visible = false
+	gems.pause()
 	panel.visible = true
 	hud_label.text = ""
 	if result_kind == "extract":
@@ -394,7 +421,7 @@ func _bag_text() -> String:
 	lines.append("保全：%s" % secure)
 	lines.append("经验 %d/3" % state.run_xp)
 	lines.append("本局金币 %d" % state.run_gold)
-	lines.append("漏过会扣血。装备直接进包。经验要走过去捡。")
+	lines.append("漏过会扣血。右边连上三颗，球打进窄道。")
 	return "\n".join(lines)
 
 

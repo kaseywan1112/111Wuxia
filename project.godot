@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="消消乐 Rogue"
-config/description="窄道向上卷动的弹球搜刮。漏过扣血。经验要捡，装备进背包。抽出的东西才能在营地升级。"
+config/description="左边是窄道弹球，右边划同色宝石。逆珠反球，分珠多球，凝珠停怪。"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"

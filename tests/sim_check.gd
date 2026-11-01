@@ -1,6 +1,7 @@
 extends SceneTree
 
 const Rules = preload("res://scripts/run_state.gd")
+const Gems = preload("res://scripts/gem_board.gd")
 
 
 func _init() -> void:
@@ -9,6 +10,7 @@ func _init() -> void:
 	_weapons()
 	_later_area()
 	_growth()
+	_gems()
 	print("SIM_OK")
 	quit(0)
 
@@ -136,6 +138,38 @@ func _growth() -> void:
 	_check(state.salvage_first() == 8, "extracted gear can be broken into gold")
 	_check(state.stash.is_empty(), "salvage removes the piece")
 	_check(state.stash_gold == before - 10 - 18 + 8, "salvage returns extracted gold")
+
+
+func _gems() -> void:
+	var cols := 4
+	var colors: Array = []
+	var kinds: Array = []
+	colors.resize(8)
+	kinds.resize(8)
+	colors.fill(0)
+	kinds.fill(0)
+	colors[2] = 1
+	kinds[1] = 1
+	var started: Dictionary = Gems.try_extend([], Vector2i(0, 0), colors, kinds, cols)
+	_check(str(started["action"]) == "start", "a path can start on a gem")
+	var straight: Dictionary = Gems.try_extend(started["path"], Vector2i(1, 0), colors, kinds, cols)
+	_check(str(straight["action"]) == "add", "an adjacent gem extends the path")
+	var turned: Dictionary = Gems.try_extend(straight["path"], Vector2i(1, 1), colors, kinds, cols)
+	_check(str(turned["action"]) == "add", "the path can turn")
+	var diagonal: Dictionary = Gems.try_extend(started["path"], Vector2i(1, 1), colors, kinds, cols)
+	_check(str(diagonal["action"]) == "ignore", "a diagonal step is refused")
+	var other: Dictionary = Gems.try_extend(straight["path"], Vector2i(2, 0), colors, kinds, cols)
+	_check(str(other["action"]) == "ignore", "a different color does not join")
+	var odd: Dictionary = Gems.try_extend(started["path"], Vector2i(3, 1), colors, kinds, cols)
+	_check(str(odd["action"]) == "ignore", "a gem that is not adjacent stays out")
+	kinds[5] = 2
+	var special: Dictionary = Gems.try_extend(straight["path"], Vector2i(1, 1), colors, kinds, cols)
+	_check(str(special["action"]) == "add", "a special gem can join any color")
+	var effects := Gems.effects_of(special["path"], kinds, cols)
+	_check(effects.has("reverse") and effects.has("split"), "the chain keeps both odd gems")
+	var undone: Dictionary = Gems.try_extend(special["path"], Vector2i(1, 0), colors, kinds, cols)
+	_check(str(undone["action"]) == "undo" and undone["path"].size() == 2, "dragging back undoes a step")
+	_check(Gems.MIN_CHAIN == 3, "a chain needs three gems")
 
 
 func _check(ok: bool, label: String) -> void:
