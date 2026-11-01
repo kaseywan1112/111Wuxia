@@ -2,73 +2,117 @@ extends Control
 
 const Rules = preload("res://scripts/run_state.gd")
 
-const FIELD_W := 760.0
-const FIELD_H := 690.0
-const MONSTER_R := 22.0
-const DEATH_Y := 612.0
+const FIELD_W := 1180.0
+const FIELD_H := 540.0
+const WALL := 22.0
+const PLAYER_R := 16.0
+const BALL_R := 9.0
+const MONSTER_R := 20.0
 
-signal struck_same(color_index: int, victims: int, amount: float)
-signal struck_basic(amount: float)
-signal killed
-signal crushed
+signal cleared
+signal died
+signal caught_ball
+signal looted(what: String)
+signal needs_pick
 
-var accept_input := false
 var running := false
+var accept_input := false
 var state: Rules = null
 
+var _player := Vector2.ZERO
+var _hp := 48.0
+var _hp_max := 48.0
+var _hurt_cd := 0.0
+var _grace := 0.0
+var _buff := 0.0
+var _trail: Line2D
+var _ball: Dictionary = {}
 var _monsters: Array = []
-var _shots: Array = []
+var _drops: Array = []
+var _room_clear := false
+var _boss := false
+var _paused := false
+var _kills := 0
+var _quota := 6
+var _scroll_speed := 38.0
+var _refire := 0.0
+var _lanes: Array[ColorRect] = []
+var pending_picks: Array[String] = []
+var _player_node: Node2D
+var _ball_node: Node2D
+var _prompt: Label
 var _next_id := 1
-var _spawn_wait := 0.4
-var _attack_wait := 0.35
-var _swing := 0.0
-var _player: Node2D
-var _swing_arc: Polygon2D
 
 
 func _ready() -> void:
 	custom_minimum_size = Vector2(FIELD_W, FIELD_H)
 	size = custom_minimum_size
-	mouse_filter = Control.MOUSE_FILTER_IGNORE
+	mouse_filter = Control.MOUSE_FILTER_STOP
 	clip_contents = true
 	var background := ColorRect.new()
 	background.color = Color("10151d")
 	background.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	background.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(background)
-	_swing_arc = Polygon2D.new()
-	_swing_arc.color = Color(1, 1, 1, 0.16)
-	_swing_arc.z_index = 3
-	add_child(_swing_arc)
-	_player = Node2D.new()
-	_player.z_index = 6
-	add_child(_player)
+	_player_node = Node2D.new()
+	_player_node.z_index = 6
+	add_child(_player_node)
 	_build_player()
+	_ball_node = Node2D.new()
+	_ball_node.z_index = 7
+	_ball_node.visible = false
+	add_child(_ball_node)
+	_trail = Line2D.new()
+	_trail.width = 4.0
+	_trail.default_color = Color(0.96, 0.94, 0.9, 0.7)
+	_trail.z_index = 6
+	add_child(_trail)
+	var ball_body := Polygon2D.new()
+	ball_body.polygon = _circle(BALL_R, 10)
+	ball_body.color = Color("f4f1ea")
+	_ball_node.add_child(ball_body)
+	_prompt = Label.new()
+	_prompt.position = Vector2(28, 16)
+	_prompt.add_theme_font_size_override("font_size", 18)
+	_prompt.add_theme_color_override("font_color", Color("f0d7a2"))
+	_prompt.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(_prompt)
+	_add_wall(Rect2(0, 0, WALL, FIELD_H))
+	_add_wall(Rect2(FIELD_W - WALL, 0, WALL, FIELD_H))
+	for i in 6:
+		var lane := ColorRect.new()
+		lane.color = Color(0.45, 0.55, 0.68, 0.28)
+		lane.position = Vector2(WALL + 8.0, float(i) * (FIELD_H / 6.0))
+		lane.size = Vector2(FIELD_W - WALL * 2.0 - 16.0, 3.0)
+		lane.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		lane.z_index = 1
+		add_child(lane)
+		_lanes.append(lane)
 
 
-func _build_player() -> void:
-	var body := Polygon2D.new()
-	body.polygon = PackedVector2Array([
-		Vector2(-18, 16), Vector2(18, 16), Vector2(14, -10), Vector2(0, -22), Vector2(-14, -10),
-	])
-	body.color = Color("d9c7a2")
-	_player.add_child(body)
-	var head := Polygon2D.new()
-	head.polygon = _hex(8.0)
-	head.color = Color("f0e2c4")
-	head.position = Vector2(0, -16)
-	_player.add_child(head)
-
-
-func begin(run_state: Rules) -> void:
+func begin(run_state: Rules, boss: bool) -> void:
 	state = run_state
 	running = true
 	accept_input = true
-	_clear()
-	_spawn_wait = 0.15
-	_attack_wait = 0.32
-	_swing = 0.0
-	_place_player()
+	_boss = boss
+	_room_clear = false
+	_buff = 0.0
+	_hurt_cd = 0.0
+	_grace = 1.4
+	_paused = false
+	_kills = 0
+	_quota = state.kill_quota(boss)
+	_scroll_speed = 36.0 + float(state.area - 1) * 12.0
+	_refire = 0.0
+	pending_picks = []
+	_clear_actors()
+	_hp_max = 72.0 + float(state.bonus_hp())
+	_hp = _hp_max
+	_player = Vector2(FIELD_W * 0.5, FIELD_H - 78.0)
+	_spawn_pack(boss)
+	_prompt.text = "场地往上卷，怪物从顶上下来。左右是墙。空格向上发射。"
+	if boss:
+		_prompt.text = "首领从上方来了。空格发射。"
 
 
 func stop() -> void:
@@ -76,280 +120,532 @@ func stop() -> void:
 	accept_input = false
 
 
+func hp_ratio() -> float:
+	return clampf(_hp / maxf(_hp_max, 1.0), 0.0, 1.0)
+
+
+func ball_out() -> bool:
+	return not _ball.is_empty()
+
+
 func _process(delta: float) -> void:
 	if not running or state == null:
 		return
-	_place_player()
-	_draw_swing()
+	_draw_player()
 	if not accept_input:
 		return
-	_tick_monsters(delta)
-	_tick_spawn(delta)
-	_tick_attack(delta)
-	_tick_shots(delta)
-	_check_crush()
+	if _paused:
+		return
+	if _buff > 0.0:
+		_buff = maxf(_buff - delta, 0.0)
+	if _refire > 0.0:
+		_refire = maxf(_refire - delta, 0.0)
+	_scroll_lanes(delta)
+	_move_player(delta)
+	_move_monsters(delta)
+	_touch_player(delta)
+	_move_ball(delta)
+	_scroll_drops(delta)
+	_collect()
+	if _room_clear:
+		_prompt.text = "这间清完了。捡完再按回车继续。"
 
 
-func _player_pos() -> Vector2:
-	return Vector2(FIELD_W * 0.5, FIELD_H - 64.0)
+func _unhandled_input(event: InputEvent) -> void:
+	if not running or not accept_input or state == null:
+		return
+	if event is InputEventMouseButton:
+		var mouse := event as InputEventMouseButton
+		if mouse.pressed and mouse.button_index == MOUSE_BUTTON_LEFT:
+			_try_shoot()
+			get_viewport().set_input_as_handled()
+		return
+	if not (event is InputEventKey):
+		return
+	var key := event as InputEventKey
+	if not key.pressed or key.echo:
+		return
+	if key.keycode == KEY_ENTER and _room_clear:
+		cleared.emit()
+		get_viewport().set_input_as_handled()
+		return
+	if key.keycode == KEY_SPACE:
+		_try_shoot()
+		get_viewport().set_input_as_handled()
 
 
-func _place_player() -> void:
-	_player.position = _player_pos()
+func _try_shoot() -> void:
+	if _room_clear or _paused or _refire > 0.0 or not _ball.is_empty():
+		return
+	var speed := state.weapon_speed()
+	var aim := _aim_angle()
+	var vel := Vector2(sin(aim), -cos(aim)) * speed
+	_ball = {
+		"pos": _player + Vector2(0, -56),
+		"vel": vel,
+		"life": state.weapon_life(),
+		"bounces": state.weapon_bounces(),
+		"damp": state.weapon_damp(),
+		"catch": state.weapon_needs_catch(),
+		"heavy": state.weapon == "hammer",
+		"arm": 0.35,
+	}
+	_ball_node.visible = true
+	_ball_node.position = _ball["pos"]
+	_trail.clear_points()
+	var tint := _ball_node.get_child(0) as Polygon2D
+	if state.weapon == "hammer":
+		tint.color = Color("e07a3a")
+		tint.scale = Vector2(1.7, 1.7)
+	elif state.weapon == "return":
+		tint.color = Color("f0d7a2")
+		tint.scale = Vector2.ONE
+	else:
+		tint.color = Color("f7f4ee")
+		tint.scale = Vector2.ONE
 
 
-func _tick_monsters(delta: float) -> void:
-	var home := _player_pos()
+func _aim_angle() -> float:
+	var mouse := get_local_mouse_position()
+	var dx := mouse.x - _player.x
+	var dy := _player.y - mouse.y
+	if dy < 24.0:
+		dy = 24.0
+	return clampf(atan2(dx, dy), -1.05, 1.05)
+
+
+func _move_player(delta: float) -> void:
+	var dir := Vector2.ZERO
+	if Input.is_key_pressed(KEY_A) or Input.is_key_pressed(KEY_LEFT):
+		dir.x -= 1.0
+	if Input.is_key_pressed(KEY_D) or Input.is_key_pressed(KEY_RIGHT):
+		dir.x += 1.0
+	if Input.is_key_pressed(KEY_W) or Input.is_key_pressed(KEY_UP):
+		dir.y -= 1.0
+	if Input.is_key_pressed(KEY_S) or Input.is_key_pressed(KEY_DOWN):
+		dir.y += 1.0
+	if dir.length() > 0.0:
+		dir = dir.normalized()
+	_player += dir * 250.0 * delta
+	_player.x = clampf(_player.x, WALL + PLAYER_R, FIELD_W - WALL - PLAYER_R)
+	_player.y = clampf(_player.y, 10.0 + PLAYER_R, FIELD_H - 10.0 - PLAYER_R)
+	_player_node.position = _player
+
+
+func _move_monsters(delta: float) -> void:
 	for monster in _monsters:
 		var pos: Vector2 = monster["pos"]
-		var speed := float(monster["speed"])
-		pos.y += speed * delta
-		var drift := clampf(home.x - pos.x, -1.0, 1.0) * 36.0 * delta
-		pos.x = clampf(pos.x + drift, MONSTER_R + 8.0, FIELD_W - MONSTER_R - 8.0)
+		var vel: Vector2 = monster["vel"]
+		vel.x = clampf(vel.x + randf_range(-40.0, 40.0) * delta, -50.0, 50.0)
+		vel.y = clampf(vel.y + randf_range(-20.0, 20.0) * delta, -16.0, 24.0)
+		var drift := _scroll_speed
+		if bool(monster["boss"]):
+			drift *= 0.35
+		pos += vel * delta
+		pos.y += drift * delta
+		var radius := float(monster["r"])
+		if pos.x < WALL + radius:
+			pos.x = WALL + radius
+			vel.x = absf(vel.x)
+		elif pos.x > FIELD_W - WALL - radius:
+			pos.x = FIELD_W - WALL - radius
+			vel.x = -absf(vel.x)
+		if bool(monster["boss"]):
+			pos.y = clampf(pos.y, 70.0, FIELD_H * 0.72)
+		elif pos.y > FIELD_H + radius:
+			pos.y = -radius - randf_range(8.0, 40.0)
+			pos.x = randf_range(FIELD_W * 0.2, FIELD_W * 0.8)
 		monster["pos"] = pos
+		monster["vel"] = vel
+		monster["hit_cd"] = maxf(float(monster["hit_cd"]) - delta, 0.0)
 		var node: Node2D = monster["node"]
 		if is_instance_valid(node):
 			node.position = pos
 
 
-func _tick_spawn(delta: float) -> void:
-	_spawn_wait -= delta
-	if _spawn_wait > 0.0 or _monsters.size() >= 8:
+func _touch_player(delta: float) -> void:
+	_grace = maxf(_grace - delta, 0.0)
+	_hurt_cd = maxf(_hurt_cd - delta, 0.0)
+	if _grace > 0.0 or _hurt_cd > 0.0:
 		return
-	_spawn_wait = 0.8
-	_spawn_monster()
-
-
-func _spawn_monster() -> void:
-	var color_index := state.rng.randi() % 5
-	if state.rng.randi() % 8 < 3:
-		color_index = state.attack_color
-	var x := state.rng.randf_range(70.0, FIELD_W - 70.0)
-	var node := _make_monster(color_index)
-	var pos := Vector2(x, -16.0)
-	node.position = pos
-	node.z_index = 2
-	add_child(node)
-	var monster := {
-		"id": _next_id,
-		"color": color_index,
-		"hp": Rules.MONSTER_HP,
-		"speed": state.rng.randf_range(34.0, 46.0),
-		"pos": pos,
-		"node": node,
-	}
-	_next_id += 1
-	_monsters.append(monster)
-
-
-func _tick_attack(delta: float) -> void:
-	if _swing > 0.0:
-		_swing = maxf(_swing - delta, 0.0)
-	_attack_wait -= delta
-	if _attack_wait > 0.0:
-		return
-	_attack_wait = state.attack_interval()
-	if state.attack_kind == "melee":
-		_swing_once()
-	else:
-		_fire_burst()
-
-
-func _swing_once() -> void:
-	_swing = 0.16
-	var hit: Array = []
 	for monster in _monsters:
 		var pos: Vector2 = monster["pos"]
-		if _in_swing(pos):
-			hit.append(monster)
-	for monster in hit:
-		_resolve_hit(monster)
-
-
-func _in_swing(pos: Vector2) -> bool:
-	var delta := pos - _player_pos()
-	if delta.length() > state.melee_reach():
-		return false
-	if delta.y > -6.0:
-		return false
-	var ang := absf(atan2(delta.x, -delta.y))
-	return ang <= state.melee_arc()
-
-
-func _fire_burst() -> void:
-	var count := state.projectile_count()
-	var mid := (count - 1) * 0.5
-	for i in count:
-		var ang := (float(i) - mid) * 0.2
-		_fire_one(ang)
-
-
-func _fire_one(ang: float) -> void:
-	var dir := Vector2(sin(ang), -cos(ang))
-	var node := _make_shot(state.attack_color)
-	var pos := _player_pos() + dir * 36.0
-	node.position = pos
-	node.rotation = dir.angle() + PI / 2.0
-	node.z_index = 4
-	add_child(node)
-	_shots.append({
-		"pos": pos,
-		"dir": dir,
-		"node": node,
-		"life": 0.0,
-	})
-
-
-func _tick_shots(delta: float) -> void:
-	var kept: Array = []
-	for shot in _shots:
-		var pos: Vector2 = shot["pos"]
-		var dir: Vector2 = shot["dir"]
-		pos += dir * 720.0 * delta
-		shot["life"] = float(shot["life"]) + delta
-		shot["pos"] = pos
-		var node: Node2D = shot["node"]
-		if is_instance_valid(node):
-			node.position = pos
-		var hit := _monster_at(pos, MONSTER_R + 10.0)
-		if not hit.is_empty():
-			if is_instance_valid(node):
-				node.queue_free()
-			_resolve_hit(hit)
+		if pos.distance_to(_player) > float(monster["r"]) + PLAYER_R:
 			continue
-		if pos.y < -30.0 or pos.x < -20.0 or pos.x > FIELD_W + 20.0 or float(shot["life"]) > 2.4:
-			if is_instance_valid(node):
-				node.queue_free()
-			continue
-		kept.append(shot)
-	_shots = kept
+		var damage := 10.0
+		if bool(monster["boss"]):
+			damage = 16.0
+		damage = maxf(damage - float(state.armor_reduction()), 4.0)
+		_hp -= damage
+		_hurt_cd = 0.55
+		_popup(_player, "-%d" % int(damage), Color("e07a72"))
+		if _hp <= 0.0:
+			_hp = 0.0
+			running = false
+			accept_input = false
+			died.emit()
+		return
 
 
-func _monster_at(pos: Vector2, radius: float) -> Dictionary:
+func _move_ball(delta: float) -> void:
+	if _ball.is_empty():
+		_ball_node.visible = false
+		return
+	var left := delta
+	var guard := 0
+	while left > 0.0 and not _ball.is_empty() and guard < 24:
+		guard += 1
+		var vel_now: Vector2 = _ball["vel"]
+		var speed := maxf(vel_now.length(), 1.0)
+		var step := minf(left, 6.0 / speed)
+		if not _step_ball(step):
+			return
+		left -= step
+	if _ball.is_empty():
+		return
+	var pos: Vector2 = _ball["pos"]
+	_ball_node.visible = true
+	_ball_node.position = pos
+	_ball_node.rotation = Vector2(_ball["vel"]).angle() + PI / 2.0
+	if _trail.get_point_count() == 0 or _trail.get_point_position(_trail.get_point_count() - 1).distance_to(pos) > 16.0:
+		_trail.add_point(pos)
+	if _trail.get_point_count() > 14:
+		_trail.remove_point(0)
+
+
+func _step_ball(delta: float) -> bool:
+	var pos: Vector2 = _ball["pos"]
+	var vel: Vector2 = _ball["vel"]
+	var nxt := pos + vel * delta
+	var damp := float(_ball["damp"])
+	var bounced := false
+	if nxt.x < WALL + BALL_R:
+		nxt.x = WALL + BALL_R
+		vel.x = absf(vel.x) * damp
+		bounced = true
+	elif nxt.x > FIELD_W - WALL - BALL_R:
+		nxt.x = FIELD_W - WALL - BALL_R
+		vel.x = -absf(vel.x) * damp
+		bounced = true
+	if nxt.y < 6.0 + BALL_R:
+		nxt.y = 6.0 + BALL_R
+		vel.y = absf(vel.y) * damp
+		bounced = true
+	elif nxt.y > FIELD_H - 6.0 - BALL_R:
+		nxt.y = FIELD_H - 6.0 - BALL_R
+		vel.y = -absf(vel.y) * damp
+		bounced = true
+	if bounced:
+		vel = vel.rotated(randf_range(-0.22, 0.22))
+		if int(_ball["bounces"]) >= 0:
+			_ball["bounces"] = int(_ball["bounces"]) - 1
+	var hit := _monster_hit_sweep(pos, nxt)
+	if not hit.is_empty():
+		var at: Vector2 = hit["pos"]
+		var touch: Vector2 = hit["hit_at"]
+		var normal := touch - at
+		if normal.length() < 1.0:
+			normal = Vector2.UP
+		normal = normal.normalized()
+		var speed := maxf(vel.length(), 80.0)
+		vel = normal * speed * damp
+		nxt = at + normal * (float(hit["r"]) + BALL_R + 2.0)
+		_hurt_monster(hit)
+		if _ball.is_empty():
+			return false
+		if bool(_ball["heavy"]):
+			_ball["bounces"] = int(_ball["bounces"]) - 1
+	_ball["arm"] = maxf(float(_ball["arm"]) - delta, 0.0)
+	if bool(_ball["catch"]) and float(_ball["arm"]) <= 0.0 and nxt.distance_to(_player) < PLAYER_R + BALL_R + 18.0:
+		_catch()
+		return false
+	if not bool(_ball["heavy"]) and vel.length() < state.weapon_speed() * 0.72:
+		vel = vel.normalized() * state.weapon_speed() * 0.85
+	_ball["pos"] = nxt
+	_ball["vel"] = vel
+	if state.weapon_life() > 0.0:
+		_ball["life"] = float(_ball["life"]) - delta
+	if state.weapon_life() > 0.0 and float(_ball["life"]) <= 0.0:
+		_drop_ball()
+		return false
+	if int(_ball["bounces"]) < 0 and state.weapon_bounces() >= 0:
+		_drop_ball()
+		return false
+	if bool(_ball["heavy"]) and vel.length() < 90.0:
+		_drop_ball()
+		return false
+	return true
+
+
+func _monster_hit_sweep(a: Vector2, b: Vector2) -> Dictionary:
 	var best: Dictionary = {}
-	var best_d := radius
+	var best_d := 9999.0
 	for monster in _monsters:
+		if float(monster["hit_cd"]) > 0.0:
+			continue
 		var at: Vector2 = monster["pos"]
-		var dist := pos.distance_to(at)
-		if dist < best_d:
+		var touch := _closest_on_segment(a, b, at)
+		var dist := touch.distance_to(at)
+		var limit := float(monster["r"]) + BALL_R + 8.0
+		if dist <= limit and dist < best_d:
 			best_d = dist
 			best = monster
+			best["hit_at"] = touch
 	return best
 
 
-func _resolve_hit(monster: Dictionary) -> void:
-	if not _alive(monster):
-		return
-	var color_index := int(monster["color"])
-	if color_index == state.attack_color:
-		var big := state.same_damage()
-		var chain := state.chain_damage()
-		_hurt(monster, big)
-		var victims := 1
-		var others: Array = []
-		for other in _monsters:
-			if other == monster:
-				continue
-			if int(other["color"]) != color_index:
-				continue
-			if not _alive(other):
-				continue
-			others.append(other)
-		for other in others:
-			_hurt(other, chain)
-			victims += 1
-		struck_same.emit(color_index, victims, big)
-		_reap()
-		return
-	_hurt(monster, state.basic_damage())
-	struck_basic.emit(state.basic_damage())
-	_reap()
+func _closest_on_segment(a: Vector2, b: Vector2, point: Vector2) -> Vector2:
+	var span := b - a
+	var length_sq := span.length_squared()
+	if length_sq < 0.001:
+		return b
+	var t := clampf((point - a).dot(span) / length_sq, 0.0, 1.0)
+	return a + span * t
 
 
-func _hurt(monster: Dictionary, amount: float) -> void:
+func _hurt_monster(monster: Dictionary) -> void:
+	var amount := state.weapon_damage()
+	if _buff > 0.0:
+		amount *= 1.5
 	monster["hp"] = float(monster["hp"]) - amount
-	_popup(monster["pos"], str(int(round(amount))), Rules.GEM_COLORS[int(monster["color"])])
+	monster["hit_cd"] = 0.16
+	_popup(monster["pos"], str(int(round(amount))), Color("f0d7a2"))
 	_refresh_bar(monster)
+	if float(monster["hp"]) > 0.0:
+		return
+	_kill_monster(monster)
 
 
-func _reap() -> void:
+func _kill_monster(monster: Dictionary) -> void:
+	var pos: Vector2 = monster["pos"]
+	var node: Node = monster["node"]
+	if is_instance_valid(node):
+		node.queue_free()
+	_monsters.erase(monster)
+	var gold := state.gold_per_kill()
+	_spawn_drop("gold", "", gold, pos + Vector2(-14, 8))
+	var force := state.note_forced_drop() or bool(monster["boss"])
+	var gear_id := state.roll_gear(force)
+	if gear_id != "":
+		_spawn_drop("gear", gear_id, 0, pos + Vector2(14, 10))
+	_kills += 1
+	var offer := state.note_kill()
+	var boss_down := _boss and bool(monster["boss"])
+	var quota_met := not _boss and _kills >= _quota
+	if boss_down or quota_met:
+		_room_clear = true
+		_drop_ball()
+		_dismiss_monsters()
+		return
+	if offer:
+		pending_picks = state.offer_picks()
+		_paused = true
+		accept_input = false
+		_prompt.text = "选一个强化。只在这一局里有效。"
+		needs_pick.emit()
+
+
+func _catch() -> void:
+	var bonus := state.catch_gold()
+	_drop_ball()
+	state.pickup_gold(bonus)
+	_buff = 4.0
+	_popup(_player + Vector2(0, -24), "接住了 +%d" % bonus, Color("f0d7a2"))
+	looted.emit("gold")
+	caught_ball.emit()
+
+
+func resume_after_pick() -> void:
+	pending_picks = []
+	_paused = false
+	if running:
+		accept_input = true
+		_prompt.text = "场地往上卷，怪物从顶上下来。左右是墙。"
+
+
+func _drop_ball() -> void:
+	if not _ball.is_empty() and state != null:
+		_refire = state.refire_delay()
+	_ball = {}
+	_ball_node.visible = false
+	if _trail != null:
+		_trail.clear_points()
+
+
+func _scroll_lanes(delta: float) -> void:
+	if _room_clear:
+		return
+	var step := _scroll_speed * delta
+	for lane in _lanes:
+		lane.position.y += step
+		if lane.position.y > FIELD_H:
+			lane.position.y -= FIELD_H
+
+
+func _scroll_drops(delta: float) -> void:
+	if _room_clear:
+		return
 	var kept: Array = []
-	for monster in _monsters:
-		if float(monster["hp"]) <= 0.0:
-			var node: Node = monster["node"]
+	for drop in _drops:
+		var pos: Vector2 = drop["pos"]
+		pos.y += _scroll_speed * delta
+		if pos.y > FIELD_H + 20.0:
+			var node: Node = drop["node"]
 			if is_instance_valid(node):
 				node.queue_free()
-			killed.emit()
-		else:
-			kept.append(monster)
-	_monsters = kept
+			continue
+		drop["pos"] = pos
+		var node: Node2D = drop["node"]
+		if is_instance_valid(node):
+			node.position = pos
+		kept.append(drop)
+	_drops = kept
 
 
-func _alive(monster: Dictionary) -> bool:
-	return float(monster["hp"]) > 0.0
-
-
-func _check_crush() -> void:
-	for monster in _monsters:
-		var pos: Vector2 = monster["pos"]
-		if pos.y + MONSTER_R >= DEATH_Y:
-			running = false
-			accept_input = false
-			crushed.emit()
-			return
-
-
-func _draw_swing() -> void:
-	_swing_arc.polygon = PackedVector2Array()
-	if state == null or _swing <= 0.0 or state.attack_kind != "melee":
-		return
-	var origin := _player_pos()
-	var reach := state.melee_reach()
-	var arc := state.melee_arc()
-	var points := PackedVector2Array()
-	points.append(origin)
-	for i in 9:
-		var ang := -arc + (arc * 2.0) * float(i) / 8.0
-		points.append(origin + Vector2(sin(ang), -cos(ang)) * reach)
-	_swing_arc.polygon = points
-	_swing_arc.color = Rules.GEM_COLORS[state.attack_color]
-	_swing_arc.color.a = 0.38
-
-
-func _clear() -> void:
+func _dismiss_monsters() -> void:
 	for monster in _monsters:
 		var node: Node = monster["node"]
 		if is_instance_valid(node):
 			node.queue_free()
-	for shot in _shots:
-		var node: Node = shot["node"]
+	_monsters.clear()
+
+
+func _collect() -> void:
+	var kept: Array = []
+	for drop in _drops:
+		var pos: Vector2 = drop["pos"]
+		if pos.distance_to(_player) <= 48.0:
+			if str(drop["kind"]) == "gold":
+				state.pickup_gold(int(drop["amount"]))
+				_popup(pos, "+%d" % int(drop["amount"]), Color("f0d7a2"))
+				looted.emit("gold")
+			else:
+				var id := str(drop["id"])
+				state.pickup_gear(id)
+				_popup(pos, "拾取 " + state.gear_name(id), Color("e7e4dc"))
+				looted.emit("gear")
+			var node: Node = drop["node"]
+			if is_instance_valid(node):
+				node.queue_free()
+			continue
+		kept.append(drop)
+	_drops = kept
+
+
+func _spawn_pack(boss: bool) -> void:
+	var count := state.monster_count()
+	if boss:
+		_spawn_monster(true, Vector2(FIELD_W * 0.5, 150.0))
+		count = 4
+	for i in count:
+		var x := randf_range(FIELD_W * 0.22, FIELD_W * 0.78)
+		var y := randf_range(28.0, FIELD_H * 0.42)
+		_spawn_monster(false, Vector2(x, y))
+
+
+func _spawn_monster(boss: bool, pos: Vector2) -> void:
+	var radius := 34.0 if boss else MONSTER_R
+	var node := _make_monster(boss, radius)
+	node.position = pos
+	node.z_index = 3
+	add_child(node)
+	var hp := state.monster_hp(boss)
+	_monsters.append({
+		"id": _next_id,
+		"hp": hp,
+		"max_hp": hp,
+		"pos": pos,
+		"vel": Vector2(randf_range(-28.0, 28.0), randf_range(-8.0, 16.0)),
+		"r": radius,
+		"boss": boss,
+		"hit_cd": 0.0,
+		"node": node,
+	})
+	_next_id += 1
+
+
+func _spawn_drop(kind: String, id: String, amount: int, pos: Vector2) -> void:
+	var node := Node2D.new()
+	node.z_index = 4
+	node.position = pos
+	var body := Polygon2D.new()
+	if kind == "gold":
+		body.polygon = PackedVector2Array([
+			Vector2(-7, -7), Vector2(7, -7), Vector2(7, 7), Vector2(-7, 7),
+		])
+		body.color = Color("f0d7a2")
+	else:
+		body.polygon = _circle(8.0, 6)
+		body.color = Color("7ec8e3")
+	node.add_child(body)
+	if kind == "gear":
+		var label := Label.new()
+		label.text = state.gear_name(id)
+		label.position = Vector2(-18, 8)
+		label.add_theme_font_size_override("font_size", 13)
+		label.add_theme_color_override("font_color", Color("e7e4dc"))
+		node.add_child(label)
+	add_child(node)
+	_drops.append({
+		"kind": kind,
+		"id": id,
+		"amount": amount,
+		"pos": pos,
+		"node": node,
+	})
+
+
+func _clear_actors() -> void:
+	for monster in _monsters:
+		var node: Node = monster["node"]
+		if is_instance_valid(node):
+			node.queue_free()
+	for drop in _drops:
+		var node: Node = drop["node"]
 		if is_instance_valid(node):
 			node.queue_free()
 	_monsters.clear()
-	_shots.clear()
+	_drops.clear()
+	_drop_ball()
 
 
-func _make_monster(color_index: int) -> Node2D:
+func _build_player() -> void:
+	var body := Polygon2D.new()
+	body.polygon = PackedVector2Array([
+		Vector2(-14, 12), Vector2(14, 12), Vector2(10, -8), Vector2(0, -16), Vector2(-10, -8),
+	])
+	body.color = Color("d9c7a2")
+	_player_node.add_child(body)
+
+
+func _draw_player() -> void:
+	_player_node.position = _player
+
+
+func _make_monster(boss: bool, radius: float) -> Node2D:
 	var node := Node2D.new()
 	var body := Polygon2D.new()
-	body.polygon = _hex(MONSTER_R)
-	body.color = Rules.GEM_COLORS[color_index]
+	body.polygon = _circle(radius, 8)
+	body.color = Color("c4554a") if boss else Color("5cbf6a")
+	if not boss and randi() % 2 == 0:
+		body.color = Color("3d9ee0")
 	node.add_child(body)
-	var eye_l := Polygon2D.new()
-	eye_l.polygon = _hex(3.4)
-	eye_l.color = Color("1a1d24")
-	eye_l.position = Vector2(-7, -5)
-	node.add_child(eye_l)
+	var eye := Polygon2D.new()
+	eye.polygon = _circle(3.2, 6)
+	eye.color = Color("1a1d24")
+	eye.position = Vector2(-6, -4)
+	node.add_child(eye)
 	var eye_r := Polygon2D.new()
-	eye_r.polygon = _hex(3.4)
+	eye_r.polygon = _circle(3.2, 6)
 	eye_r.color = Color("1a1d24")
-	eye_r.position = Vector2(7, -5)
+	eye_r.position = Vector2(6, -4)
 	node.add_child(eye_r)
 	var bar := Polygon2D.new()
 	bar.name = "hp"
 	bar.color = Color("f0d7a2")
 	bar.polygon = PackedVector2Array([
-		Vector2(-14, 14), Vector2(14, 14), Vector2(14, 17), Vector2(-14, 17),
+		Vector2(-12, radius - 2.0), Vector2(12, radius - 2.0),
+		Vector2(12, radius + 2.0), Vector2(-12, radius + 2.0),
 	])
 	node.add_child(bar)
 	return node
@@ -362,47 +658,43 @@ func _refresh_bar(monster: Dictionary) -> void:
 	var bar := node.get_node_or_null("hp") as Polygon2D
 	if bar == null:
 		return
-	var ratio := clampf(float(monster["hp"]) / Rules.MONSTER_HP, 0.0, 1.0)
-	var width := 28.0 * ratio
+	var ratio := clampf(float(monster["hp"]) / float(monster["max_hp"]), 0.0, 1.0)
+	var width := 24.0 * ratio
+	var y := float(monster["r"]) - 2.0
 	bar.polygon = PackedVector2Array([
-		Vector2(-14, 14), Vector2(-14 + width, 14), Vector2(-14 + width, 17), Vector2(-14, 17),
+		Vector2(-12, y), Vector2(-12 + width, y),
+		Vector2(-12 + width, y + 4.0), Vector2(-12, y + 4.0),
 	])
-	bar.color = Color("f0d7a2") if ratio > 0.35 else Color("e07a72")
-
-
-func _make_shot(color_index: int) -> Node2D:
-	var node := Node2D.new()
-	var body := Polygon2D.new()
-	body.polygon = PackedVector2Array([
-		Vector2(0, -14), Vector2(4, 7), Vector2(0, 3), Vector2(-4, 7),
-	])
-	body.color = Rules.GEM_COLORS[color_index]
-	node.add_child(body)
-	return node
 
 
 func _popup(at: Vector2, text: String, color: Color) -> void:
 	var label := Label.new()
 	label.text = text
-	label.position = at + Vector2(-18, -28)
+	label.position = at + Vector2(-20, -26)
 	label.z_index = 8
+	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	label.add_theme_font_size_override("font_size", 16)
 	label.add_theme_color_override("font_color", color)
-	label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(label)
 	var tween := create_tween()
-	tween.tween_property(label, "position", label.position + Vector2(0, -24), 0.45)
+	tween.tween_property(label, "position", label.position + Vector2(0, -22), 0.45)
 	tween.parallel().tween_property(label, "modulate:a", 0.0, 0.45)
 	tween.finished.connect(label.queue_free)
 
 
-func _hex(radius: float) -> PackedVector2Array:
+func _circle(radius: float, sides: int) -> PackedVector2Array:
 	var points := PackedVector2Array()
-	for i in 6:
-		var angle := TAU * float(i) / 6.0 - PI / 6.0
+	for i in sides:
+		var angle := TAU * float(i) / float(sides)
 		points.append(Vector2(cos(angle), sin(angle)) * radius)
 	return points
 
 
-func _draw() -> void:
-	draw_line(Vector2(28, DEATH_Y), Vector2(FIELD_W - 28, DEATH_Y), Color(0.85, 0.35, 0.32, 0.45), 2.0)
+func _add_wall(rect: Rect2) -> void:
+	var wall := ColorRect.new()
+	wall.color = Color("8aa0b8")
+	wall.position = rect.position
+	wall.size = rect.size
+	wall.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	wall.z_index = 5
+	add_child(wall)
