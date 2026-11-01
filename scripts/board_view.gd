@@ -2,8 +2,8 @@ extends Control
 
 const Rules = preload("res://scripts/run_state.gd")
 
-const FIELD_W := 1180.0
-const FIELD_H := 540.0
+const FIELD_W := 440.0
+const FIELD_H := 560.0
 const WALL := 22.0
 const PLAYER_R := 16.0
 const BALL_R := 9.0
@@ -14,6 +14,7 @@ signal died
 signal caught_ball
 signal looted(what: String)
 signal needs_pick
+signal lane_event(kind: String)
 
 var running := false
 var accept_input := false
@@ -29,12 +30,10 @@ var _trail: Line2D
 var _ball: Dictionary = {}
 var _monsters: Array = []
 var _drops: Array = []
-var _room_clear := false
-var _boss := false
 var _paused := false
-var _kills := 0
-var _quota := 6
-var _scroll_speed := 38.0
+var _boss_alive := false
+var _scroll_speed := 46.0
+var _spawn_wait := 0.0
 var _refire := 0.0
 var _lanes: Array[ColorRect] = []
 var pending_picks: Array[String] = []
@@ -90,29 +89,26 @@ func _ready() -> void:
 		_lanes.append(lane)
 
 
-func begin(run_state: Rules, boss: bool) -> void:
+func begin(run_state: Rules) -> void:
 	state = run_state
 	running = true
 	accept_input = true
-	_boss = boss
-	_room_clear = false
+	_boss_alive = false
 	_buff = 0.0
 	_hurt_cd = 0.0
-	_grace = 1.4
+	_grace = 1.2
 	_paused = false
-	_kills = 0
-	_quota = state.kill_quota(boss)
-	_scroll_speed = 36.0 + float(state.area - 1) * 12.0
+	_scroll_speed = 46.0 + float(state.area - 1) * 8.0
+	_spawn_wait = 2.2
 	_refire = 0.0
 	pending_picks = []
 	_clear_actors()
 	_hp_max = 72.0 + float(state.bonus_hp())
 	_hp = _hp_max
-	_player = Vector2(FIELD_W * 0.5, FIELD_H - 78.0)
-	_spawn_pack(boss)
-	_prompt.text = "场地往上卷，怪物从顶上下来。左右是墙。空格向上发射。"
-	if boss:
-		_prompt.text = "首领从上方来了。空格发射。"
+	_player = Vector2(FIELD_W * 0.5, FIELD_H - 70.0)
+	_spawn_monster(false, Vector2(FIELD_W * 0.38, 70.0))
+	_spawn_monster(false, Vector2(FIELD_W * 0.66, 150.0))
+	_prompt.text = "窄道往上卷。漏下去会扣血。经验要走过去捡。"
 
 
 func stop() -> void:
@@ -131,6 +127,7 @@ func ball_out() -> bool:
 func _process(delta: float) -> void:
 	if not running or state == null:
 		return
+	delta = minf(delta, 0.05)
 	_draw_player()
 	if not accept_input:
 		return
@@ -140,15 +137,22 @@ func _process(delta: float) -> void:
 		_buff = maxf(_buff - delta, 0.0)
 	if _refire > 0.0:
 		_refire = maxf(_refire - delta, 0.0)
+	var event := state.tick(delta)
+	if event == "rest":
+		_pause_for_event("rest")
+		return
+	if event == "boss":
+		_spawn_monster(true, Vector2(FIELD_W * 0.5, -36.0))
+		_boss_alive = true
+		_prompt.text = "首领从上方来了。"
+		lane_event.emit("boss")
 	_scroll_lanes(delta)
 	_move_player(delta)
 	_move_monsters(delta)
-	_touch_player(delta)
+	_spawn_more(delta)
 	_move_ball(delta)
 	_scroll_drops(delta)
 	_collect()
-	if _room_clear:
-		_prompt.text = "这间清完了。捡完再按回车继续。"
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -165,17 +169,13 @@ func _unhandled_input(event: InputEvent) -> void:
 	var key := event as InputEventKey
 	if not key.pressed or key.echo:
 		return
-	if key.keycode == KEY_ENTER and _room_clear:
-		cleared.emit()
-		get_viewport().set_input_as_handled()
-		return
 	if key.keycode == KEY_SPACE:
 		_try_shoot()
 		get_viewport().set_input_as_handled()
 
 
 func _try_shoot() -> void:
-	if _room_clear or _paused or _refire > 0.0 or not _ball.is_empty():
+	if _paused or _refire > 0.0 or not _ball.is_empty():
 		return
 	var speed := state.weapon_speed()
 	var aim := _aim_angle()
@@ -233,6 +233,7 @@ func _move_player(delta: float) -> void:
 
 
 func _move_monsters(delta: float) -> void:
+	var leaked: Array = []
 	for monster in _monsters:
 		var pos: Vector2 = monster["pos"]
 		var vel: Vector2 = monster["vel"]
@@ -250,17 +251,16 @@ func _move_monsters(delta: float) -> void:
 		elif pos.x > FIELD_W - WALL - radius:
 			pos.x = FIELD_W - WALL - radius
 			vel.x = -absf(vel.x)
-		if bool(monster["boss"]):
-			pos.y = clampf(pos.y, 70.0, FIELD_H * 0.72)
-		elif pos.y > FIELD_H + radius:
-			pos.y = -radius - randf_range(8.0, 40.0)
-			pos.x = randf_range(FIELD_W * 0.2, FIELD_W * 0.8)
 		monster["pos"] = pos
 		monster["vel"] = vel
 		monster["hit_cd"] = maxf(float(monster["hit_cd"]) - delta, 0.0)
 		var node: Node2D = monster["node"]
 		if is_instance_valid(node):
 			node.position = pos
+		if pos.y > _player.y + 6.0:
+			leaked.append(monster)
+	for monster in leaked:
+		_monster_passed(monster)
 
 
 func _touch_player(delta: float) -> void:
@@ -422,27 +422,18 @@ func _kill_monster(monster: Dictionary) -> void:
 	if is_instance_valid(node):
 		node.queue_free()
 	_monsters.erase(monster)
-	var gold := state.gold_per_kill()
-	_spawn_drop("gold", "", gold, pos + Vector2(-14, 8))
+	_spawn_drop("xp", "", state.gold_per_kill(), pos)
 	var force := state.note_forced_drop() or bool(monster["boss"])
 	var gear_id := state.roll_gear(force)
 	if gear_id != "":
-		_spawn_drop("gear", gear_id, 0, pos + Vector2(14, 10))
-	_kills += 1
-	var offer := state.note_kill()
-	var boss_down := _boss and bool(monster["boss"])
-	var quota_met := not _boss and _kills >= _quota
-	if boss_down or quota_met:
-		_room_clear = true
-		_drop_ball()
-		_dismiss_monsters()
-		return
-	if offer:
-		pending_picks = state.offer_picks()
-		_paused = true
-		accept_input = false
-		_prompt.text = "选一个强化。只在这一局里有效。"
-		needs_pick.emit()
+		state.pickup_gear(gear_id)
+		_popup(pos, "入包 " + state.gear_name(gear_id), Color("7ec8e3"))
+		looted.emit("gear")
+	state.note_kill()
+	if bool(monster["boss"]):
+		_boss_alive = false
+		state.on_boss_killed()
+		_pause_for_event("boss_down")
 
 
 func _catch() -> void:
@@ -460,7 +451,14 @@ func resume_after_pick() -> void:
 	_paused = false
 	if running:
 		accept_input = true
-		_prompt.text = "场地往上卷，怪物从顶上下来。左右是墙。"
+		_prompt.text = "窄道还在往上卷。"
+
+
+func resume_lane() -> void:
+	_paused = false
+	if running:
+		accept_input = true
+		_prompt.text = "窄道还在往上卷。"
 
 
 func _drop_ball() -> void:
@@ -473,8 +471,6 @@ func _drop_ball() -> void:
 
 
 func _scroll_lanes(delta: float) -> void:
-	if _room_clear:
-		return
 	var step := _scroll_speed * delta
 	for lane in _lanes:
 		lane.position.y += step
@@ -483,8 +479,6 @@ func _scroll_lanes(delta: float) -> void:
 
 
 func _scroll_drops(delta: float) -> void:
-	if _room_clear:
-		return
 	var kept: Array = []
 	for drop in _drops:
 		var pos: Vector2 = drop["pos"]
@@ -502,6 +496,46 @@ func _scroll_drops(delta: float) -> void:
 	_drops = kept
 
 
+func _monster_passed(monster: Dictionary) -> void:
+	if not running:
+		return
+	var boss := bool(monster["boss"])
+	var damage := float(state.pass_damage(boss) - state.armor_reduction())
+	damage = maxf(damage, 4.0)
+	_hp -= damage
+	_popup(_player, "漏过 -%d" % int(damage), Color("e07a72"))
+	var node: Node = monster["node"]
+	if is_instance_valid(node):
+		node.queue_free()
+	_monsters.erase(monster)
+	if boss:
+		_boss_alive = false
+		state.boss_leaked()
+	if _hp <= 0.0:
+		_hp = 0.0
+		running = false
+		accept_input = false
+		died.emit()
+
+
+func _spawn_more(delta: float) -> void:
+	_spawn_wait -= delta
+	if _spawn_wait > 0.0:
+		return
+	_spawn_wait = maxf(1.3, 2.6 - float(state.area - 1) * 0.3)
+	var cap := 3 + mini(state.area, 4)
+	if _monsters.size() >= cap:
+		return
+	var x := randf_range(WALL + 36.0, FIELD_W - WALL - 36.0)
+	_spawn_monster(false, Vector2(x, -28.0))
+
+
+func _pause_for_event(kind: String) -> void:
+	_paused = true
+	accept_input = false
+	lane_event.emit(kind)
+
+
 func _dismiss_monsters() -> void:
 	for monster in _monsters:
 		var node: Node = monster["node"]
@@ -514,16 +548,17 @@ func _collect() -> void:
 	var kept: Array = []
 	for drop in _drops:
 		var pos: Vector2 = drop["pos"]
-		if pos.distance_to(_player) <= 48.0:
-			if str(drop["kind"]) == "gold":
-				state.pickup_gold(int(drop["amount"]))
-				_popup(pos, "+%d" % int(drop["amount"]), Color("f0d7a2"))
-				looted.emit("gold")
-			else:
-				var id := str(drop["id"])
-				state.pickup_gear(id)
-				_popup(pos, "拾取 " + state.gear_name(id), Color("e7e4dc"))
-				looted.emit("gear")
+		if pos.distance_to(_player) <= 36.0 and str(drop["kind"]) == "xp":
+			state.pickup_gold(int(drop["amount"]))
+			var leveled := state.add_xp(1)
+			_popup(pos, "经验", Color("9be7a8"))
+			looted.emit("xp")
+			if leveled:
+				pending_picks = state.offer_picks()
+				_paused = true
+				accept_input = false
+				_prompt.text = "经验够了。选一个，只在这一局。"
+				needs_pick.emit()
 			var node: Node = drop["node"]
 			if is_instance_valid(node):
 				node.queue_free()
@@ -569,22 +604,15 @@ func _spawn_drop(kind: String, id: String, amount: int, pos: Vector2) -> void:
 	node.z_index = 4
 	node.position = pos
 	var body := Polygon2D.new()
-	if kind == "gold":
-		body.polygon = PackedVector2Array([
-			Vector2(-7, -7), Vector2(7, -7), Vector2(7, 7), Vector2(-7, 7),
-		])
-		body.color = Color("f0d7a2")
-	else:
-		body.polygon = _circle(8.0, 6)
-		body.color = Color("7ec8e3")
+	body.polygon = _circle(8.0, 6)
+	body.color = Color("9be7a8")
 	node.add_child(body)
-	if kind == "gear":
-		var label := Label.new()
-		label.text = state.gear_name(id)
-		label.position = Vector2(-18, 8)
-		label.add_theme_font_size_override("font_size", 13)
-		label.add_theme_color_override("font_color", Color("e7e4dc"))
-		node.add_child(label)
+	var label := Label.new()
+	label.text = "经验"
+	label.position = Vector2(-16, 8)
+	label.add_theme_font_size_override("font_size", 13)
+	label.add_theme_color_override("font_color", Color("9be7a8"))
+	node.add_child(label)
 	add_child(node)
 	_drops.append({
 		"kind": kind,

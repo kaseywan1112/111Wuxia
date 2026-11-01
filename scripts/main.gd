@@ -19,6 +19,7 @@ var title_label: Label
 var body_label: Label
 var hud_label: Label
 var panel: VBoxContainer
+var bag_label: Label
 var font: Font
 var voice: AudioStreamPlayer
 
@@ -51,43 +52,56 @@ func _ready() -> void:
 	body_label = _label("", 18)
 	body_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	column.add_child(body_label)
-	var host := CenterContainer.new()
-	host.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	host.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	column.add_child(host)
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 18)
+	row.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	column.add_child(row)
 	field = Field.new()
-	field.cleared.connect(_on_cleared)
 	field.died.connect(_on_died)
 	field.caught_ball.connect(_on_caught)
 	field.looted.connect(_on_looted)
 	field.needs_pick.connect(_on_pick)
-	host.add_child(field)
+	field.lane_event.connect(_on_lane)
+	row.add_child(field)
+	var side := VBoxContainer.new()
+	side.custom_minimum_size = Vector2(360, 0)
+	side.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	side.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	side.add_theme_constant_override("separation", 8)
+	row.add_child(side)
+	bag_label = _label("", 16)
+	bag_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	side.add_child(bag_label)
 	panel = VBoxContainer.new()
 	panel.add_theme_constant_override("separation", 8)
-	panel.alignment = BoxContainer.ALIGNMENT_CENTER
-	host.add_child(panel)
+	side.add_child(panel)
 	voice = AudioStreamPlayer.new()
 	add_child(voice)
 	_show_start()
 
 
 func _process(_delta: float) -> void:
+	if state != null and (mode == COMBAT or mode == PICK or mode == REST):
+		bag_label.text = _bag_text()
 	if mode == COMBAT and state != null:
-		var bag := "空"
-		if state.backpack != "":
-			bag = state.gear_name(state.backpack)
 		var buff := ""
 		if field._buff > 0.0:
 			buff = "  ·  接住加成"
-		hud_label.text = "区域 %d  ·  %s  ·  生命 %d  ·  本局金币 %d  ·  身上 %d  ·  背包 %s%s" % [
+		var when := state.event_name()
+		var soon := ""
+		if state.beat == 2:
+			soon = "首领在场上"
+		else:
+			soon = "距%s %d 秒" % [when, int(ceil(state.seconds_left()))]
+		hud_label.text = "区域 %d  ·  %s  ·  生命 %d  ·  %s%s" % [
 			state.area,
 			state.weapon_name(),
 			int(ceil(field._hp)),
-			state.run_gold,
-			state.carried.size(),
-			bag,
+			soon,
 			buff,
 		]
+		bag_label.text = _bag_text()
 		if state.run_damage > 0 or state.run_bounce > 0 or state.run_catch > 0 or state.run_rate > 0:
 			hud_label.text += "  ·  局内 伤+%d 弹+%d 接+%d 速+%d" % [state.run_damage, state.run_bounce, state.run_catch, state.run_rate]
 		if caught_note != "":
@@ -147,7 +161,8 @@ func _show_start() -> void:
 	panel.visible = true
 	hud_label.text = ""
 	title_label.text = "弹球搜刮"
-	body_label.text = "场地往上卷。你在框里上下左右走，左右是墙，球向上打出去。怪物从顶上下来。捡起来也不算带走：保全背包只能放一件，或者在休整时抽出。\n这一局里打掉一批怪，可以在伤害、多弹、接球、射速里选一个，倒下就没了。营地里只有抽出的金币和装备能升级、镶一颗珠、点三个天赋。\n%s\n5 升级第一件   6 镶赤珠   7 点下一个天赋   8 拆解第一件" % _stash_line()
+	bag_label.text = _stash_line()
+	body_label.text = "窄道一直往上卷，不会清场。开头怪很少，后面一直从顶上补。漏过你身边会扣血，扣光这一局就结束。经验球要走过去捡，装备直接进右边的背包。\n到点会休整，也能抽出。首领也是到点才来，打完窄道继续。保全背包仍然只能放一件。\n%s\n5 升级第一件   6 镶赤珠   7 点下一个天赋   8 拆解第一件" % _stash_line()
 	_clear_panel()
 	_button("5  升级第一件", _upgrade_camp)
 	_button("6  给第一件镶赤珠", _socket_camp)
@@ -158,32 +173,25 @@ func _show_start() -> void:
 
 func _start_run() -> void:
 	state.begin_run(randi())
-	_enter_room()
-
-
-func _enter_room() -> void:
-	var room := state.current_room()
-	if room == "rest":
-		_show_rest()
-		return
 	mode = COMBAT
 	caught_note = ""
 	panel.visible = false
 	field.visible = true
 	title_label.text = "弹球搜刮"
-	body_label.text = "场地往上卷，怪物从上方下来。连弹一直弹，回手要接住，重锤又慢又沉。"
-	if room == "boss":
-		body_label.text = "首领出来了。打掉它，下一处是休整，可以抽出。"
-	field.begin(state, room == "boss")
+	body_label.text = "左边是窄道。右边是背包。漏过扣血，经验要捡，装备直接进包。"
+	field.begin(state)
 	_tone(520.0, 0.05)
 
 
-func _on_cleared() -> void:
-	if mode != COMBAT:
+func _on_lane(kind: String) -> void:
+	if kind == "boss":
+		body_label.text = "首领从上方来了。打掉它就能休整，窄道不会清掉。"
 		return
-	field.stop()
-	state.advance()
-	_enter_room()
+	if mode != COMBAT and mode != PICK:
+		return
+	_show_rest()
+	if kind == "boss_down":
+		body_label.text = "首领倒了。可以抽出，也可以继续这条窄道。\n" + body_label.text
 
 
 func _on_died() -> void:
@@ -251,10 +259,10 @@ func _choose(id: String) -> void:
 
 func _show_rest() -> void:
 	mode = REST
-	field.visible = false
-	field.stop()
+	field.visible = true
 	panel.visible = true
 	hud_label.text = "区域 %d" % state.area
+	bag_label.text = _bag_text()
 	title_label.text = "休整"
 	var carried := _names(state.carried)
 	if carried == "":
@@ -309,8 +317,12 @@ func _extract() -> void:
 
 
 func _continue_deeper() -> void:
-	state.advance()
-	_enter_room()
+	mode = COMBAT
+	panel.visible = false
+	field.visible = true
+	title_label.text = "弹球搜刮"
+	body_label.text = "窄道继续。怪还会从顶上出来。"
+	field.resume_lane()
 
 
 func _show_result() -> void:
@@ -366,6 +378,24 @@ func _salvage_camp() -> void:
 		body_label.text = "没有可拆的抽出装备。\n" + body_label.text
 	else:
 		body_label.text = "拆了一件，得到 %d 抽出金币。\n" % gained + body_label.text
+
+
+func _bag_text() -> String:
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("背包")
+	if state.carried.is_empty():
+		lines.append("还没有装备")
+	else:
+		for id in state.carried:
+			lines.append(state.gear_name(str(id)))
+	var secure := "空"
+	if state.backpack != "":
+		secure = state.gear_name(state.backpack)
+	lines.append("保全：%s" % secure)
+	lines.append("经验 %d/3" % state.run_xp)
+	lines.append("本局金币 %d" % state.run_gold)
+	lines.append("漏过会扣血。装备直接进包。经验要走过去捡。")
+	return "\n".join(lines)
 
 
 func _stash_line() -> String:

@@ -56,8 +56,11 @@ var stash: Array[String] = []
 var stash_gold: int = 0
 var area: int = 1
 var step: int = 0
+var clock: float = 0.0
+var beat: int = 0
 var gear_forced: int = 0
 var run_kills: int = 0
+var run_xp: int = 0
 var run_damage: int = 0
 var run_bounce: int = 0
 var run_catch: int = 0
@@ -79,6 +82,8 @@ func begin_run(new_seed: int) -> void:
 	run_gold = 0
 	area = 1
 	step = 0
+	clock = 0.0
+	beat = 0
 	gear_forced = 0
 	_clear_run_growth()
 
@@ -217,16 +222,58 @@ func fail_run() -> Dictionary:
 	return {"lost": lost, "lost_gold": lost_gold, "kept": kept}
 
 
-func current_room() -> String:
-	var schedule := _schedule()
-	return str(schedule[step])
+func tick(delta: float) -> String:
+	if beat == 2:
+		return ""
+	clock += delta
+	if clock < _event_limit():
+		return ""
+	clock = 0.0
+	if beat == 0:
+		beat = 1
+		return "rest"
+	beat = 2
+	return "boss"
 
 
-func advance() -> void:
-	step += 1
-	if step >= _schedule().size():
-		area += 1
-		step = 0
+func seconds_left() -> float:
+	if beat == 2:
+		return 0.0
+	return maxf(_event_limit() - clock, 0.0)
+
+
+func event_name() -> String:
+	if beat == 1:
+		return "首领"
+	if beat == 2:
+		return "首领在场"
+	return "休整"
+
+
+func on_boss_killed() -> void:
+	beat = 0
+	clock = 0.0
+	area += 1
+
+
+func boss_leaked() -> void:
+	beat = 0
+	clock = 0.0
+
+
+func pass_damage(boss: bool) -> int:
+	var amount := 14 + (area - 1) * 4
+	if boss:
+		amount += 10
+	return amount
+
+
+func add_xp(amount: int) -> bool:
+	run_xp += amount
+	if run_xp < 3:
+		return false
+	run_xp -= 3
+	return true
 
 
 func monster_hp(boss: bool) -> float:
@@ -371,10 +418,10 @@ func salvage_first() -> int:
 	return 8
 
 
-func _schedule() -> Array:
-	if area <= 1:
-		return ["fight", "rest", "fight", "boss", "rest"]
-	return ["fight", "fight", "boss", "rest"]
+func _event_limit() -> float:
+	if beat == 0:
+		return 8.0 if area <= 1 else 16.0
+	return 8.0
 
 
 func _ring_bonus() -> float:
@@ -508,6 +555,7 @@ func _sync_stash() -> void:
 
 func _clear_run_growth() -> void:
 	run_kills = 0
+	run_xp = 0
 	run_damage = 0
 	run_bounce = 0
 	run_catch = 0
