@@ -183,17 +183,17 @@ func _start_run() -> void:
 	field.visible = true
 	gems.visible = true
 	title_label.text = "守城"
-	body_label.text = "左边城墙。右边交换相邻宝石。三连满蓄，四连连射，五连特殊。"
+	body_label.text = "左边城墙。珠子会追最近的怪。右边交换，落下连击。"
 	field.begin(state)
 	gems.open(state.seed_value)
 	_tone(520.0, 0.05)
 
 
-func _on_matched(color_index: int, length: int, kind: String, _wave: int) -> void:
+func _on_matched(color_index: int, length: int, kind: String, wave: int) -> void:
 	if mode != COMBAT:
 		return
 	state.set_main_from_color(color_index)
-	field.feed(color_index, length, kind)
+	field.feed(color_index, length, kind, wave)
 	_tone(640.0, 0.04)
 
 

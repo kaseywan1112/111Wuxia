@@ -157,6 +157,9 @@ func _gems() -> void:
 	var five := [0, 0, 0, 0, 0, 1, 2, 1, 2, 1]
 	var fives := Gems.find_matches(five, 5)
 	_check(int(fives[0]["length"]) == 5 and Gems.kind_for_length(5) == "special", "five of a color is a special")
+	_check(Gems.combo_multiplier(0) == 1.0, "the first clear is not a combo")
+	_check(Gems.combo_multiplier(1) == 2.0, "the first cascade doubles the shot")
+	_check(Gems.combo_multiplier(2) == 3.0, "the next cascade raises the combo")
 
 
 func _check(ok: bool, label: String) -> void:

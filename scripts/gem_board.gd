@@ -30,6 +30,8 @@ var _selected := Vector2i(-1, -1)
 var _press := Vector2i(-1, -1)
 var _busy := false
 var _held := false
+var _motion := 0
+var _combo_label: Label
 
 
 func _ready() -> void:
@@ -56,6 +58,15 @@ func _ready() -> void:
 	title.add_theme_font_size_override("font_size", 12)
 	title.add_theme_color_override("font_color", Color("f0d7a2"))
 	add_child(title)
+	_combo_label = Label.new()
+	_combo_label.text = ""
+	_combo_label.visible = false
+	_combo_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_combo_label.z_index = 8
+	_combo_label.position = Vector2(PAD, HEADER + 8)
+	_combo_label.add_theme_font_size_override("font_size", 22)
+	_combo_label.add_theme_color_override("font_color", Color("f0d7a2"))
+	add_child(_combo_label)
 	for y in ROWS:
 		for x in COLS:
 			var well := ColorRect.new()
@@ -82,11 +93,14 @@ func _ready() -> void:
 
 
 func open(seed_value: int) -> void:
+	_motion += 1
 	_rng.seed = seed_value
 	_held = false
 	_busy = false
 	_selected = Vector2i(-1, -1)
 	_press = Vector2i(-1, -1)
+	if _combo_label != null:
+		_combo_label.visible = false
 	_fill_playable()
 	_snap()
 	accept_input = true
@@ -150,6 +164,10 @@ static func kind_for_length(length: int) -> String:
 	if length >= 4:
 		return "burst"
 	return "shot"
+
+
+static func combo_multiplier(wave: int) -> float:
+	return float(maxi(wave, 0) + 1)
 
 
 static func clear_cells(grid: Array, cols: int, cells: Array) -> Array:
@@ -247,21 +265,61 @@ func _try_swap(a: Vector2i, b: Vector2i) -> void:
 
 
 func _resolve() -> void:
+	var token := _motion
 	_busy = true
 	accept_input = false
+	_selected = Vector2i(-1, -1)
+	_press = Vector2i(-1, -1)
+	_paint()
 	var wave := 0
 	while wave < 6:
+		if token != _motion:
+			return
 		var groups := find_matches(colors, COLS)
 		if groups.is_empty():
 			break
+		var popped: Array[int] = []
 		for group in groups:
 			var length := int(group["length"])
 			var kind := kind_for_length(length)
 			var cells: Array = group["cells"]
+			for cell in cells:
+				var spot: Vector2i = cell
+				var index := _index(spot.x, spot.y)
+				if popped.has(index):
+					continue
+				popped.append(index)
+				_pop_cell(spot)
 			matched.emit(int(group["color"]), length, kind, wave)
 			_apply_group(cells)
-		_gravity()
+		_show_combo(wave)
+		await get_tree().create_timer(0.14).timeout
+		if token != _motion:
+			return
+		var starts: Array = _drop_and_fill()
+		_paint()
+		var tween := create_tween()
+		tween.set_parallel(true)
+		var moving := false
+		for i in colors.size():
+			var target := _origin(i % COLS, int(i / COLS))
+			var start: Vector2 = starts[i]
+			_gems[i].scale = Vector2.ONE
+			_gems[i].modulate = Color.WHITE
+			_gems[i].position = start
+			_marks[i].position = start + Vector2(8, 6)
+			if start.distance_to(target) > 1.0:
+				var travel := clampf(start.distance_to(target) / 680.0, 0.16, 0.36)
+				tween.tween_property(_gems[i], "position", target, travel).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+				tween.tween_property(_marks[i], "position", target + Vector2(8, 6), travel).set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+				moving = true
+		if moving:
+			await tween.finished
+		if token != _motion:
+			return
 		wave += 1
+	if token != _motion:
+		return
 	if find_matches(colors, COLS).is_empty() and not _has_move():
 		_fill_playable()
 	_snap()
@@ -278,25 +336,81 @@ func _apply_group(cells: Array) -> void:
 		pieces[index] = 0
 
 
-func _gravity() -> void:
+func _drop_and_fill() -> Array:
+	var starts: Array = []
+	starts.resize(colors.size())
+	for i in colors.size():
+		starts[i] = _origin(i % COLS, int(i / COLS))
 	for x in COLS:
 		var survivors: Array[Dictionary] = []
 		for y in range(ROWS - 1, -1, -1):
 			var index := _index(x, y)
 			if colors[index] < 0:
 				continue
-			survivors.append({"color": colors[index], "piece": pieces[index]})
+			survivors.append({
+				"color": colors[index],
+				"piece": pieces[index],
+				"from_y": y,
+			})
 		var write := ROWS - 1
 		for item in survivors:
 			var index := _index(x, write)
 			colors[index] = int(item["color"])
 			pieces[index] = int(item["piece"])
+			starts[index] = _origin(x, int(item["from_y"]))
 			write -= 1
+		var spawn_row := -1
 		while write >= 0:
 			var index := _index(x, write)
 			colors[index] = _rng.randi_range(0, GEM_COLORS.size() - 1)
 			pieces[index] = 0
+			starts[index] = _origin(x, spawn_row)
+			spawn_row -= 1
 			write -= 1
+	return starts
+
+
+func _pop_cell(cell: Vector2i) -> void:
+	var index := _index(cell.x, cell.y)
+	var gem := _gems[index]
+	var color := gem.color
+	gem.visible = false
+	var center := _origin(cell.x, cell.y) + Vector2(TILE, TILE) * 0.5
+	var burst := Polygon2D.new()
+	burst.polygon = _pop_polygon()
+	burst.color = color
+	burst.position = center
+	burst.z_index = 6
+	add_child(burst)
+	var pop := create_tween()
+	pop.set_parallel(true)
+	pop.tween_property(burst, "scale", Vector2(1.55, 1.55), 0.13)
+	pop.tween_property(burst, "modulate:a", 0.0, 0.13)
+	pop.finished.connect(burst.queue_free)
+	for i in 4:
+		var shard := Polygon2D.new()
+		shard.polygon = _pop_polygon()
+		shard.scale = Vector2(0.38, 0.38)
+		shard.color = color
+		shard.position = center
+		shard.z_index = 6
+		add_child(shard)
+		var dir := Vector2.RIGHT.rotated(TAU * float(i) / 4.0 + 0.55)
+		var fly := create_tween()
+		fly.set_parallel(true)
+		fly.tween_property(shard, "position", center + dir * 26.0, 0.16)
+		fly.tween_property(shard, "modulate:a", 0.0, 0.16)
+		fly.finished.connect(shard.queue_free)
+
+
+func _show_combo(wave: int) -> void:
+	if _combo_label == null or wave <= 0:
+		return
+	_combo_label.text = "连击 %d" % (wave + 1)
+	_combo_label.visible = true
+	_combo_label.modulate.a = 1.0
+	var fade := create_tween()
+	fade.tween_property(_combo_label, "modulate:a", 0.0, 0.7)
 
 
 func _fill_playable() -> void:
@@ -402,6 +516,16 @@ func _pixel_size() -> Vector2:
 		PAD * 2 + COLS * TILE + (COLS - 1) * GAP,
 		PAD * 2 + HEADER + ROWS * TILE + (ROWS - 1) * GAP
 	)
+
+
+func _pop_polygon() -> PackedVector2Array:
+	var t := float(TILE)
+	return PackedVector2Array([
+		Vector2(0, -t * 0.34),
+		Vector2(t * 0.32, 0),
+		Vector2(0, t * 0.34),
+		Vector2(-t * 0.32, 0),
+	])
 
 
 func _gem_polygon() -> PackedVector2Array:

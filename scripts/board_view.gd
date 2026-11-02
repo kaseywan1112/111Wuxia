@@ -195,25 +195,34 @@ func _unhandled_input(_event: InputEvent) -> void:
 	return
 
 
-func feed(color_index: int, length: int, kind: String) -> void:
+func feed(color_index: int, length: int, kind: String, wave: int = 0) -> void:
 	if not running or _paused or state == null:
 		return
 	var id := state.weapon_id_at(color_index)
 	var name := state.weapon_name(id)
+	var combo := maxi(wave, 0) + 1
+	var combo_text := ""
+	if combo > 1:
+		combo_text = "连击 %d · " % combo
 	if kind == "special" or length >= 5:
-		_prompt.text = "%s · 特殊" % name
+		_prompt.text = "%s%s · 特殊" % [combo_text, name]
 		_popup(_player, _prompt.text, SHOT_COLORS[color_index])
-		_spawn_marble(color_index, "special")
+		_spawn_marble(color_index, "special", float(combo))
 		return
 	var times := 1
 	if kind == "burst" or length >= 4:
 		times = state.burst_count(color_index)
-		_prompt.text = "%s ×%d" % [name, times]
+		_prompt.text = "%s%s ×%d" % [combo_text, name, times]
 	else:
-		_prompt.text = "%s · 满蓄" % name
+		_prompt.text = "%s%s · 满蓄" % [combo_text, name]
 	_popup(_player, _prompt.text, SHOT_COLORS[color_index])
 	for i in times:
-		_shot_queue.append({"t": float(i) * 0.18, "color": color_index, "mode": "full"})
+		_shot_queue.append({
+			"t": float(i) * 0.18,
+			"color": color_index,
+			"mode": "full",
+			"combo": float(combo),
+		})
 
 
 func _charge_marble(delta: float) -> void:
@@ -243,49 +252,53 @@ func _drain_queue(delta: float) -> void:
 	for item in _shot_queue:
 		item["t"] = float(item["t"]) - delta
 		if float(item["t"]) <= 0.0:
-			_spawn_marble(int(item["color"]), str(item["mode"]))
+			_spawn_marble(int(item["color"]), str(item["mode"]), float(item.get("combo", 1.0)))
 		else:
 			kept.append(item)
 	_shot_queue = kept
 
 
-func _spawn_marble(color_index: int, mode: String) -> void:
+func _spawn_marble(color_index: int, mode: String, combo: float = 1.0) -> void:
 	var id := state.weapon_id_at(color_index)
 	var style := state.weapon_style(id)
 	if mode == "special":
-		_cast_special(color_index, style)
+		_cast_special(color_index, style, combo)
 		return
 	if style == "guard":
-		_heal_wall(float(state.guard_amount()))
+		_heal_wall(float(state.guard_amount()) * combo)
 		return
 	var hits := 1
 	if style == "pierce" or style == "slow":
 		hits = 8
+	var start := _player + Vector2(0, -24)
 	var node := _make_shot(color_index, 1.0)
 	_shots.append({
-		"pos": _player + Vector2(0, -24),
-		"vel": Vector2(0, -460),
+		"pos": start,
+		"vel": _aim_velocity(start, {}, 460.0),
 		"style": style,
 		"hits": hits,
 		"power": 1.0,
 		"amount": state.weapon_damage(id),
+		"combo": combo,
 		"color": color_index,
 		"seen": {},
 		"node": node,
 	})
 
 
-func _cast_special(color_index: int, style: String) -> void:
-	var amount := state.weapon_damage(state.weapon_id_at(color_index))
+func _cast_special(color_index: int, style: String, combo: float = 1.0) -> void:
+	var amount := state.weapon_damage(state.weapon_id_at(color_index)) * combo
 	if style == "hit":
+		var start := _player + Vector2(0, -24)
 		var node := _make_shot(color_index, 1.7)
 		_shots.append({
-			"pos": _player + Vector2(0, -24),
-			"vel": Vector2(0, -420),
+			"pos": start,
+			"vel": _aim_velocity(start, {}, 420.0),
 			"style": "hit",
 			"hits": 1,
 			"power": 3.0,
-			"amount": amount,
+			"amount": amount / maxf(combo, 1.0),
+			"combo": combo,
 			"color": color_index,
 			"seen": {},
 			"node": node,
@@ -297,9 +310,9 @@ func _cast_special(color_index: int, style: String) -> void:
 			monster["slow"] = 3.2
 		_popup(_player, "全场迟滞", SHOT_COLORS[color_index])
 	else:
-		_heal_wall(float(state.guard_amount()) * 2.0)
-		_shield += float(state.guard_amount())
-		_popup(_player, "大盾 +%d" % state.guard_amount(), SHOT_COLORS[color_index])
+		_heal_wall(float(state.guard_amount()) * 2.0 * combo)
+		_shield += float(state.guard_amount()) * combo
+		_popup(_player, "大盾 +%d" % int(state.guard_amount() * combo), SHOT_COLORS[color_index])
 
 
 func _heal_wall(amount: float) -> void:
@@ -327,11 +340,43 @@ func _make_shot(color_index: int, scale: float) -> Node2D:
 	return node
 
 
+func _aim_velocity(from: Vector2, seen: Dictionary, speed: float) -> Vector2:
+	var target := _nearest_monster(from, seen)
+	if target.is_empty():
+		return Vector2(0, -speed)
+	var aim: Vector2 = target["pos"] - from
+	if aim.length() < 1.0:
+		return Vector2(0, -speed)
+	return aim.normalized() * speed
+
+
+func _nearest_monster(from: Vector2, seen: Dictionary) -> Dictionary:
+	var best: Dictionary = {}
+	var best_d := INF
+	for monster in _monsters:
+		var id := int(monster["id"])
+		if seen.has(id):
+			continue
+		var pos: Vector2 = monster["pos"]
+		var dist := from.distance_squared_to(pos)
+		if dist < best_d:
+			best_d = dist
+			best = monster
+	return best
+
+
 func _move_shots(delta: float) -> void:
 	var kept: Array = []
 	for shot in _shots:
 		var pos: Vector2 = shot["pos"]
 		var vel: Vector2 = shot["vel"]
+		var seen: Dictionary = shot["seen"]
+		var speed := maxf(vel.length(), 420.0)
+		var desired := _aim_velocity(pos, seen, speed)
+		vel = vel.lerp(desired, clampf(delta * 14.0, 0.0, 1.0))
+		if vel.length() > 1.0:
+			vel = vel.normalized() * speed
+		shot["vel"] = vel
 		var nxt := pos + vel * delta
 		var alive := true
 		for monster in _monsters:
@@ -342,7 +387,7 @@ func _move_shots(delta: float) -> void:
 				continue
 			shot["seen"][id] = true
 			var style := str(shot["style"])
-			var amount := float(shot["amount"]) * float(shot["power"])
+			var amount := float(shot["amount"]) * float(shot["power"]) * float(shot.get("combo", 1.0))
 			if style == "slow":
 				monster["slow"] = 2.2
 				_damage_monster(monster, amount * 0.5, "慢")
@@ -357,7 +402,7 @@ func _move_shots(delta: float) -> void:
 			if style == "hit" or int(shot["hits"]) <= 0:
 				alive = false
 				break
-		if nxt.y < -20.0:
+		if nxt.y < -30.0 or nxt.y > FIELD_H + 24.0 or nxt.x < -30.0 or nxt.x > FIELD_W + 30.0:
 			alive = false
 		shot["pos"] = nxt
 		var node: Node2D = shot["node"]
