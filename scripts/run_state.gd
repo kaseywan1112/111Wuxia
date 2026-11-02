@@ -28,9 +28,12 @@ var seed_value: int = 1
 var weapon: String = "red"
 var owned_weapons: Array[String] = ["red", "blue", "green", "purple", "gold"]
 var carried: Array[String] = []
+var carried_rarity: Array[int] = []
 var backpack: String = ""
+var backpack_rarity: int = 0
 var run_gold: int = 0
 var stash: Array[String] = []
+var stash_rarity: Array[int] = []
 var stash_gold: int = 0
 var area: int = 1
 var step: int = 0
@@ -39,6 +42,7 @@ var beat: int = 0
 var gear_forced: int = 0
 var run_kills: int = 0
 var run_xp: int = 0
+var run_level: int = 0
 var run_damage: int = 0
 var run_bounce: int = 0
 var run_catch: int = 0
@@ -57,7 +61,9 @@ func begin_run(new_seed: int) -> void:
 	weapon = "red"
 	_ensure_weapons()
 	carried = []
+	carried_rarity = []
 	backpack = ""
+	backpack_rarity = 0
 	run_gold = 0
 	area = 1
 	step = 0
@@ -155,10 +161,46 @@ func gear_line(id: String) -> String:
 	return "%s · %s · %s" % [str(GEAR[id]["name"]), str(GEAR[id]["slot"]), str(GEAR[id]["desc"])]
 
 
-func roll_gear(force: bool) -> String:
-	if not force and rng.randf() > 0.42:
-		return ""
+const RARITY_NAMES: Array[String] = ["普通", "魔法", "稀有", "传说"]
+
+
+func rarity_name(rarity: int) -> String:
+	return RARITY_NAMES[clampi(rarity, 0, RARITY_NAMES.size() - 1)]
+
+
+func rarity_multiplier(rarity: int) -> int:
+	var scale: Array[int] = [1, 2, 3, 5]
+	return scale[clampi(rarity, 0, scale.size() - 1)]
+
+
+func gear_label(id: String, rarity: int = 0) -> String:
+	return "%s%s" % [rarity_name(rarity), gear_name(id)]
+
+
+func try_drop(boss: bool) -> bool:
+	var chance := 0.2 if boss else 0.06
+	return rng.randf() < chance
+
+
+func roll_piece() -> String:
 	return GEAR_ORDER[rng.randi() % GEAR_ORDER.size()]
+
+
+func roll_rarity() -> int:
+	var roll := rng.randf()
+	if roll < 0.03:
+		return 3
+	if roll < 0.12:
+		return 2
+	if roll < 0.34:
+		return 1
+	return 0
+
+
+func roll_gear(force: bool) -> String:
+	if not force and not try_drop(false):
+		return ""
+	return roll_piece()
 
 
 func note_forced_drop() -> bool:
@@ -168,9 +210,11 @@ func note_forced_drop() -> bool:
 	return true
 
 
-func pickup_gear(id: String) -> void:
-	if GEAR.has(id):
-		carried.append(id)
+func pickup_gear(id: String, rarity: int = 0) -> void:
+	if not GEAR.has(id):
+		return
+	carried.append(id)
+	carried_rarity.append(clampi(rarity, 0, 3))
 
 
 func pickup_gold(amount: int) -> void:
@@ -178,42 +222,51 @@ func pickup_gold(amount: int) -> void:
 
 
 func secure_first() -> String:
+	_sync_carried()
 	if backpack != "" or carried.is_empty():
 		return ""
 	var id := str(carried[0])
-	carried.remove_at(0)
 	backpack = id
+	backpack_rarity = carried_rarity[0]
+	carried.remove_at(0)
+	carried_rarity.remove_at(0)
 	return id
 
 
 func extract() -> Dictionary:
+	_sync_carried()
 	var items: Array[String] = []
-	for id in carried:
-		var kept := str(id)
+	for i in carried.size():
+		var kept := str(carried[i])
 		items.append(kept)
-		_bank_gear(kept)
+		_bank_gear(kept, carried_rarity[i])
 	if backpack != "":
 		items.append(backpack)
-		_bank_gear(backpack)
+		_bank_gear(backpack, backpack_rarity)
 	var gold := run_gold
 	stash_gold += run_gold
 	carried = []
+	carried_rarity = []
 	backpack = ""
+	backpack_rarity = 0
 	run_gold = 0
 	_clear_run_growth()
 	return {"items": items, "gold": gold}
 
 
 func fail_run() -> Dictionary:
+	_sync_carried()
 	var lost: Array[String] = []
 	for id in carried:
 		lost.append(str(id))
 	var lost_gold := run_gold
 	var kept := backpack
 	if backpack != "":
-		_bank_gear(backpack)
+		_bank_gear(backpack, backpack_rarity)
 	carried = []
+	carried_rarity = []
 	backpack = ""
+	backpack_rarity = 0
 	run_gold = 0
 	_clear_run_growth()
 	return {"lost": lost, "lost_gold": lost_gold, "kept": kept}
@@ -265,11 +318,16 @@ func pass_damage(boss: bool) -> int:
 	return amount
 
 
+func xp_to_level() -> int:
+	return mini(2 + run_level, 6)
+
+
 func add_xp(amount: int) -> bool:
 	run_xp += amount
-	if run_xp < 3:
+	if run_xp < xp_to_level():
 		return false
-	run_xp -= 3
+	run_xp -= xp_to_level()
+	run_level += 1
 	return true
 
 
@@ -411,6 +469,8 @@ func salvage_first() -> int:
 	stash.remove_at(0)
 	stash_level.remove_at(0)
 	stash_gem.remove_at(0)
+	if not stash_rarity.is_empty():
+		stash_rarity.remove_at(0)
 	stash_gold += 8
 	return 8
 
@@ -422,36 +482,28 @@ func _event_limit() -> float:
 
 
 func _ring_bonus() -> float:
-	if _holding("ring"):
-		return 4.0
-	return 0.0
+	return 4.0 * float(_carried_power("ring"))
 
 
 func _jade_bonus() -> int:
-	if _holding("jade"):
-		return 2
-	return 0
+	return 2 * _carried_power("jade")
 
 
 func armor_reduction() -> int:
-	var reduction := 0
-	if _holding("hide"):
-		reduction += 2
+	var reduction := 2 * _carried_power("hide")
 	_sync_stash()
 	for i in stash.size():
 		if str(stash[i]) == "hide":
-			reduction += 1 + stash_level[i]
+			reduction += (1 + stash_level[i]) * rarity_multiplier(stash_rarity[i])
 	return reduction
 
 
 func bonus_hp() -> int:
-	var extra := 0
-	if _holding("helm"):
-		extra += 12
+	var extra := 12 * _carried_power("helm")
 	_sync_stash()
 	for i in stash.size():
 		if str(stash[i]) == "helm":
-			extra += 4 + stash_level[i] * 4
+			extra += (4 + stash_level[i] * 4) * rarity_multiplier(stash_rarity[i])
 		if stash_gem[i] == "blue":
 			extra += 6
 	if talents.has("steady"):
@@ -479,7 +531,10 @@ func save_to(path: String) -> void:
 	_sync_stash()
 	var gear_names := PackedStringArray()
 	for i in stash.size():
-		gear_names.append("%s:%d:%s" % [str(stash[i]), stash_level[i], stash_gem[i]])
+		var rarity := 0
+		if i < stash_rarity.size():
+			rarity = stash_rarity[i]
+		gear_names.append("%s:%d:%s:%d" % [str(stash[i]), stash_level[i], stash_gem[i], rarity])
 	var weapon_names := PackedStringArray()
 	for id in owned_weapons:
 		weapon_names.append(id)
@@ -500,6 +555,7 @@ func load_from(path: String) -> bool:
 	stash = []
 	stash_level = []
 	stash_gem = []
+	stash_rarity = []
 	var gear_text := str(file.get_value("stash", "gear", ""))
 	if gear_text != "":
 		for part in gear_text.split(",", false):
@@ -514,8 +570,12 @@ func load_from(path: String) -> bool:
 				level = int(bits[1])
 			if bits.size() > 2:
 				gem = str(bits[2])
+			var rarity := 0
+			if bits.size() > 3:
+				rarity = clampi(int(bits[3]), 0, 3)
 			stash_level.append(level)
 			stash_gem.append(gem)
+			stash_rarity.append(rarity)
 	stash_gold = int(file.get_value("stash", "gold", 0))
 	owned_weapons = []
 	var weapon_text := str(file.get_value("stash", "weapons", ""))
@@ -534,10 +594,29 @@ func load_from(path: String) -> bool:
 	return true
 
 
-func _bank_gear(id: String) -> void:
+func _bank_gear(id: String, rarity: int = 0) -> void:
 	stash.append(id)
 	stash_level.append(0)
 	stash_gem.append("")
+	stash_rarity.append(clampi(rarity, 0, 3))
+
+
+func _sync_carried() -> void:
+	while carried_rarity.size() < carried.size():
+		carried_rarity.append(0)
+	while carried_rarity.size() > carried.size():
+		carried_rarity.remove_at(carried_rarity.size() - 1)
+
+
+func _carried_power(base_id: String) -> int:
+	_sync_carried()
+	var total := 0
+	for i in carried.size():
+		if str(carried[i]) == base_id:
+			total += rarity_multiplier(carried_rarity[i])
+	if backpack == base_id:
+		total += rarity_multiplier(backpack_rarity)
+	return total
 
 
 func _sync_stash() -> void:
@@ -545,10 +624,14 @@ func _sync_stash() -> void:
 		stash_level.append(0)
 	while stash_gem.size() < stash.size():
 		stash_gem.append("")
+	while stash_rarity.size() < stash.size():
+		stash_rarity.append(0)
 	while stash_level.size() > stash.size():
 		stash_level.remove_at(stash_level.size() - 1)
 	while stash_gem.size() > stash.size():
 		stash_gem.remove_at(stash_gem.size() - 1)
+	while stash_rarity.size() > stash.size():
+		stash_rarity.remove_at(stash_rarity.size() - 1)
 
 
 func _ensure_weapons() -> void:
@@ -565,6 +648,7 @@ func _ensure_weapons() -> void:
 func _clear_run_growth() -> void:
 	run_kills = 0
 	run_xp = 0
+	run_level = 0
 	run_damage = 0
 	run_bounce = 0
 	run_catch = 0
@@ -577,7 +661,7 @@ func _stash_damage() -> float:
 	for i in stash.size():
 		bonus += float(stash_level[i])
 		if str(stash[i]) == "ring":
-			bonus += 2.0
+			bonus += 2.0 * float(rarity_multiplier(stash_rarity[i]))
 		if stash_gem[i] == "red":
 			bonus += 3.0
 	if talents.has("scar"):
@@ -590,7 +674,7 @@ func _stash_gold_bonus() -> int:
 	_sync_stash()
 	for i in stash.size():
 		if str(stash[i]) == "jade":
-			bonus += 1
+			bonus += rarity_multiplier(stash_rarity[i])
 		if stash_gem[i] == "gold":
 			bonus += 2
 	if talents.has("eye"):

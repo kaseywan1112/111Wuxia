@@ -72,8 +72,9 @@ func _ready() -> void:
 	side.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	side.add_theme_constant_override("separation", 8)
 	row.add_child(side)
-	bag_label = _label("", 16)
+	bag_label = _label("", 14)
 	bag_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	bag_label.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
 	side.add_child(bag_label)
 	gems = Gems.new()
 	gems.matched.connect(_on_matched)
@@ -246,14 +247,14 @@ func _on_pick() -> void:
 		return
 	mode = PICK
 	panel.visible = true
-	gems.visible = false
+	gems.visible = true
 	gems.pause()
-	title_label.text = "击杀之后"
-	body_label.text = "选一个。只在这一局里有效，倒下就丢掉。"
+	title_label.text = "升级"
+	body_label.text = "三选一。只在这一局，倒下就丢掉。"
 	_clear_panel()
 	for i in field.pending_picks.size():
 		var pick_id := str(field.pending_picks[i])
-		_button("%d  %s" % [i + 1, state.pick_name(pick_id)], _choose.bind(pick_id))
+		_button("%d  %s" % [i + 1, state.pick_name(pick_id)], _choose.bind(pick_id), false)
 
 
 func _choose_index(index: int) -> void:
@@ -289,7 +290,7 @@ func _show_rest() -> void:
 		carried = "空"
 	var bag := "空"
 	if state.backpack != "":
-		bag = state.gear_name(state.backpack)
+		bag = state.gear_label(state.backpack, state.backpack_rarity)
 	body_label.text = "可以抽出，离开时带走身上的金币和装备。保全背包里的那一件，就算倒下也会留下。\n身上：%s\n保全背包：%s\n本局金币：%d\n当前武器：%s" % [
 		carried, bag, state.run_gold, state.weapon_name(),
 	]
@@ -305,7 +306,7 @@ func _secure() -> void:
 		body_label.text = "背包已满，或身上没有可放的东西。\n" + body_label.text
 		return
 	_show_rest()
-	body_label.text = "已放进保全背包：%s\n%s" % [state.gear_name(id), body_label.text]
+	body_label.text = "已放进保全背包：%s\n%s" % [state.gear_label(id, state.backpack_rarity), body_label.text]
 	_tone(620.0, 0.05)
 
 
@@ -402,21 +403,26 @@ func _salvage_camp() -> void:
 
 
 func _bag_text() -> String:
-	var lines: PackedStringArray = PackedStringArray()
-	lines.append("背包")
-	if state.carried.is_empty():
-		lines.append("还没有装备")
-	else:
-		for id in state.carried:
-			lines.append(state.gear_name(str(id)))
 	var secure := "空"
 	if state.backpack != "":
-		secure = state.gear_name(state.backpack)
-	lines.append("保全：%s" % secure)
-	lines.append("经验 %d/3" % state.run_xp)
-	lines.append("本局金币 %d" % state.run_gold)
-	lines.append("怪物碰到城墙会扣血。右边三连才发射。")
-	return "\n".join(lines)
+		secure = state.gear_label(state.backpack, state.backpack_rarity)
+	var gear := "无"
+	if not state.carried.is_empty():
+		state._sync_carried()
+		var bits: PackedStringArray = PackedStringArray()
+		var shown := mini(state.carried.size(), 3)
+		for i in shown:
+			bits.append(state.gear_label(str(state.carried[i]), state.carried_rarity[i]))
+		gear = "、".join(bits)
+		if state.carried.size() > shown:
+			gear += " 等%d件" % state.carried.size()
+	return "经验 %d/%d  ·  金 %d  ·  保全 %s\n装备 %s" % [
+		state.run_xp,
+		state.xp_to_level(),
+		state.run_gold,
+		secure,
+		gear,
+	]
 
 
 func _stash_line() -> String:
@@ -424,8 +430,12 @@ func _stash_line() -> String:
 		return "还没有抽出的东西"
 	var parts: PackedStringArray = PackedStringArray()
 	parts.append("已抽出金币 %d" % state.stash_gold)
+	state._sync_stash()
 	for i in state.stash.size():
-		var bit := state.gear_name(str(state.stash[i]))
+		var rarity := 0
+		if i < state.stash_rarity.size():
+			rarity = state.stash_rarity[i]
+		var bit := state.gear_label(str(state.stash[i]), rarity)
 		if i < state.stash_level.size() and state.stash_level[i] > 0:
 			bit += "+%d" % state.stash_level[i]
 		if i < state.stash_gem.size() and state.stash_gem[i] != "":
@@ -452,10 +462,10 @@ func _clear_panel() -> void:
 		child.free()
 
 
-func _button(text: String, action: Callable) -> void:
+func _button(text: String, action: Callable, tall: bool = true) -> void:
 	var button := Button.new()
 	button.text = text
-	button.custom_minimum_size = Vector2(360, 42)
+	button.custom_minimum_size = Vector2(280, 36) if tall else Vector2(220, 28)
 	button.focus_mode = Control.FOCUS_NONE
 	button.pressed.connect(action)
 	panel.add_child(button)

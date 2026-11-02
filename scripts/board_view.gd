@@ -481,11 +481,11 @@ func _kill_monster(monster: Dictionary) -> void:
 		node.queue_free()
 	_monsters.erase(monster)
 	_spawn_drop("xp", "", state.gold_per_kill(), pos)
-	var force := state.note_forced_drop() or bool(monster["boss"])
-	var gear_id := state.roll_gear(force)
-	if gear_id != "":
-		state.pickup_gear(gear_id)
-		_popup(pos, "入包 " + state.gear_name(gear_id), Color("7ec8e3"))
+	if state.try_drop(bool(monster["boss"])):
+		var gear_id := state.roll_piece()
+		var rarity := state.roll_rarity()
+		state.pickup_gear(gear_id, rarity)
+		_popup(pos, "入包 " + state.gear_label(gear_id, rarity), Color("7ec8e3"))
 		looted.emit("gear")
 	state.note_kill()
 	if bool(monster["boss"]):
@@ -521,8 +521,15 @@ func _scroll_drops(delta: float) -> void:
 	var kept: Array = []
 	for drop in _drops:
 		var pos: Vector2 = drop["pos"]
-		pos.y += _scroll_speed * delta
-		if pos.y > FIELD_H + 20.0:
+		if str(drop["kind"]) == "xp":
+			var aim := _player - pos
+			var dist := aim.length()
+			if dist > 1.0:
+				var step := minf(340.0 * delta, dist)
+				pos += aim / dist * step
+		else:
+			pos.y += _scroll_speed * delta
+		if pos.y > FIELD_H + 20.0 or pos.x < -40.0 or pos.x > FIELD_W + 40.0:
 			var node: Node = drop["node"]
 			if is_instance_valid(node):
 				node.queue_free()
@@ -589,22 +596,23 @@ func _dismiss_monsters() -> void:
 
 func _collect() -> void:
 	var kept: Array = []
+	var stopped := false
 	for drop in _drops:
 		var pos: Vector2 = drop["pos"]
-		if pos.distance_to(_player) <= 36.0 and str(drop["kind"]) == "xp":
+		if not stopped and str(drop["kind"]) == "xp" and pos.distance_to(_player) <= 26.0:
 			state.pickup_gold(int(drop["amount"]))
 			var leveled := state.add_xp(1)
-			_popup(pos, "经验", Color("9be7a8"))
 			looted.emit("xp")
+			var node: Node = drop["node"]
+			if is_instance_valid(node):
+				node.queue_free()
 			if leveled:
 				pending_picks = state.offer_picks()
 				_paused = true
 				accept_input = false
-				_prompt.text = "经验够了。选一个，只在这一局。"
+				_prompt.text = "升级了。选一个，只在这一局。"
 				needs_pick.emit()
-			var node: Node = drop["node"]
-			if is_instance_valid(node):
-				node.queue_free()
+				stopped = true
 			continue
 		kept.append(drop)
 	_drops = kept
@@ -647,15 +655,9 @@ func _spawn_drop(kind: String, id: String, amount: int, pos: Vector2) -> void:
 	node.z_index = 4
 	node.position = pos
 	var body := Polygon2D.new()
-	body.polygon = _circle(8.0, 6)
+	body.polygon = _circle(7.0, 6)
 	body.color = Color("9be7a8")
 	node.add_child(body)
-	var label := Label.new()
-	label.text = "经验"
-	label.position = Vector2(-16, 8)
-	label.add_theme_font_size_override("font_size", 13)
-	label.add_theme_color_override("font_color", Color("9be7a8"))
-	node.add_child(label)
 	add_child(node)
 	_drops.append({
 		"kind": kind,

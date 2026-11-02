@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="消消乐 Rogue"
-config/description="左边法师守城墙，珠子追怪。右边八乘八交换，落下连击。"
+config/description="经验球飞向法师，局内三选一。装备少见，分普通、魔法、稀有、传说。"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.6", "Forward Plus")
 config/icon="res://icon.svg"

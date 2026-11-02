@@ -10,6 +10,7 @@ func _init() -> void:
 	_weapons()
 	_later_area()
 	_growth()
+	_rarity()
 	_gems()
 	print("SIM_OK")
 	quit(0)
@@ -25,8 +26,9 @@ func _flow() -> void:
 	state.on_boss_killed()
 	_check(state.area == 2, "a killed boss moves the lane on")
 	_check(state.tick(5.0) == "", "the lane continues after the boss")
-	_check(not state.add_xp(1) and not state.add_xp(1), "xp is gathered, not granted")
-	_check(state.add_xp(1), "enough xp offers a pick")
+	_check(not state.add_xp(1), "one orb is not a level")
+	_check(state.add_xp(1), "two orbs level up")
+	_check(state.xp_to_level() == 3, "the next level asks for more")
 	state.pickup_gear("ring")
 	_check(state.carried.has("ring"), "gear goes straight into the backpack")
 	_check(state.pass_damage(false) >= 14, "a monster that passes hurts")
@@ -114,7 +116,7 @@ func _growth() -> void:
 	_check(state.guard_amount() == 12, "guard bonus grew")
 	_check(state.auto_interval() < 1.25, "fire rate shortens the charge")
 	state.fail_run()
-	_check(state.run_damage == 0 and state.run_catch == 0 and state.catch_gold() == 8, "run picks are lost on death")
+	_check(state.run_damage == 0 and state.run_catch == 0 and state.catch_gold() == 8 and state.run_level == 0, "run picks are lost on death")
 	state.stash_gold = 40
 	state._bank_gear("hide")
 	_check(state.upgrade_first() == "hide", "extracted gold upgrades gear")
@@ -134,6 +136,53 @@ func _growth() -> void:
 	_check(state.salvage_first() == 8, "extracted gear can be broken into gold")
 	_check(state.stash.is_empty(), "salvage removes the piece")
 	_check(state.stash_gold == before - 10 - 18 + 8, "salvage returns extracted gold")
+
+
+func _rarity() -> void:
+	var state: Rules = Rules.new()
+	state.begin_run(11)
+	var normal := 0
+	for _i in 200:
+		if state.try_drop(false):
+			normal += 1
+	var bossy := 0
+	for _i in 200:
+		if state.try_drop(true):
+			bossy += 1
+	_check(normal > 0 and normal < 30 and bossy > normal and bossy < 80, "gear is uncommon and bosses drop more")
+	var counts: Array[int] = [0, 0, 0, 0]
+	for _i in 400:
+		counts[state.roll_rarity()] += 1
+	_check(counts[0] > counts[1] and counts[1] > counts[2] and counts[2] > counts[3] and counts[3] > 0, "higher rarity is rarer")
+	_check(state.rarity_name(0) == "普通" and state.rarity_name(1) == "魔法", "common and magic names")
+	_check(state.rarity_name(2) == "稀有" and state.rarity_name(3) == "传说", "rare and legendary names")
+	var plain: Rules = Rules.new()
+	plain.begin_run(1)
+	plain.pickup_gear("ring", 0)
+	var legend: Rules = Rules.new()
+	legend.begin_run(1)
+	legend.pickup_gear("ring", 3)
+	_check(legend.weapon_damage() > plain.weapon_damage(), "a legendary ring hits harder")
+	var bank: Rules = Rules.new()
+	bank.begin_run(8)
+	bank.pickup_gear("helm", 3)
+	bank.extract()
+	var path := "user://sim_rarity.cfg"
+	bank.save_to(path)
+	var loaded: Rules = Rules.new()
+	_check(loaded.load_from(path), "load rarity")
+	_check(loaded.stash.size() == 1 and loaded.stash_rarity[0] == 3, "rarity persists")
+	_check(loaded.bonus_hp() > 12, "a legendary helm adds more health")
+	var old_file := ConfigFile.new()
+	old_file.set_value("stash", "gear", "ring:1:red")
+	old_file.set_value("stash", "gold", 0)
+	old_file.set_value("stash", "weapons", "")
+	old_file.set_value("stash", "talents", "")
+	old_file.save("user://sim_old_gear.cfg")
+	var old: Rules = Rules.new()
+	_check(old.load_from("user://sim_old_gear.cfg"), "old stash loads")
+	_check(old.stash_rarity.size() == 1 and old.stash_rarity[0] == 0, "old gear is 普通")
+	_check(old.gear_label("ring", 0) == "普通铜戒", "a common ring is labeled")
 
 
 func _gems() -> void:
